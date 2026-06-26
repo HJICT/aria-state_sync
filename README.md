@@ -87,23 +87,27 @@ go build -o statesync-server cmd/server/main.go
 ### 2. Pub/Sub Channels (실시간 알림)
 
 -   **Channel**: `asterisk:device_state`
-    -   Payload (JSON): `{"event_type": "DeviceState", "exten": "1001", "state": "BUSY", "connected_line": "1002", "timestamp": "..."}`
+    -   Payload (JSON): `{"event_type": "DeviceState", "class": "Normal", "exten": "1001", "state": "Busy", "connected_line": "1002", "timestamp": "..."}`
 -   **Channel**: `asterisk:reachable_state`
-    -   Payload (JSON): `{"event_type": "ReachableState", "exten": "1001", "state": "REACHABLE", "timestamp": "..."}`
+    -   Payload (JSON): `{"event_type": "ReachableState", "exten": "1001", "state": "Reachable", "timestamp": "..."}`
 
 ## 🚥 상태 정의 (State Definitions)
 
+### Call Class (통화 종류)
+- `Normal`: 일반 통화
+- `Broadcast`: 방송용 통화
+
 ### Device State (통화 상태)
--   `IDLE`: 대기 상태
--   `USE`: 통화 중
--   `BUSY`: 통화 중 (바쁨)
--   `RINGING`: 벨 울림
--   `RING-USE`: 통화 중 + 벨 울림 (멀티 라인)
--   `HOLD`: 통화 보류
--   `UNAVAILABLE`: 기기 사용 불가
--   `UNKNOWN`: 알 수 없음
+-   `Idle`: 대기 상태
+-   `Use`: 통화 중
+-   `Busy`: 통화 중 (바쁨)
+-   `Ringing`: 벨 울림
+-   `Ring-Use`: 통화 중 + 벨 울림 (멀티 라인)
+-   `Hold`: 통화 보류
+-   `Unavailable`: 기기 사용 불가
+-   `Unknown`: 알 수 없음
 
 ### Reachable State (네트워크 상태)
--   `REACHABLE`: 네트워크 연결 가능 (가동 중)
--   `UNREACHABLE`: 네트워크 연결 끊김 (중단)
--   `UNKNOWN`: 상태 확인 불가
+-   `Reachable`: 네트워크 연결 가능 (가동 중)
+-   `Unreachable`: 네트워크 연결 끊김 (중단)
+-   `Unknown`: 상태 확인 불가

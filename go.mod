@@ -2,7 +2,7 @@ module statesync
 
 go 1.26.3
 
-replace common_lib => ../common_lib
+replace common_lib => ../aria-common_lib
 
 require (
 	common_lib v0.0.0

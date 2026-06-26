@@ -6,10 +6,11 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
-	"common_lib/asterisk"
+	ami "common_lib/asterisk"
 	"common_lib/redis"
 
 	"go.uber.org/zap"
@@ -19,32 +20,34 @@ import (
 type DeviceState string
 
 const (
-	DeviceStateIdle        DeviceState = "IDLE"
-	DeviceStateUse         DeviceState = "USE"
-	DeviceStateBusy        DeviceState = "BUSY"
-	DeviceStateRinging     DeviceState = "RINGING"
-	DeviceStateRingUse     DeviceState = "RING-USE"
-	DeviceStateHold        DeviceState = "HOLD"
-	DeviceStateUnavailable DeviceState = "UNAVAILABLE"
-	DeviceStateUnknown     DeviceState = "UNKNOWN"
+	DeviceStateIdle        DeviceState = "Idle"
+	DeviceStateUse         DeviceState = "Use"
+	DeviceStateBusy        DeviceState = "Busy"
+	DeviceStateRinging     DeviceState = "Ringing"
+	DeviceStateRingUse     DeviceState = "RingUse"
+	DeviceStateHold        DeviceState = "Hold"
+	DeviceStateUnavailable DeviceState = "Unavailable"
+	DeviceStateUnknown     DeviceState = "Unknown"
 )
 
 // ReachableState 는 시스템 내부에서 관리하는 네트워크(장치) 상태 표준 타입입니다.
 type ReachableState string
 
 const (
-	ReachableStateAvailable   ReachableState = "REACHABLE"
-	ReachableStateUnavailable ReachableState = "UNREACHABLE"
-	ReachableStateUnknown     ReachableState = "UNKNOWN"
+	ReachableStateAvailable   ReachableState = "Reachable"
+	ReachableStateUnavailable ReachableState = "Unreachable"
+	ReachableStateUnknown     ReachableState = "Unknown"
 )
 
 // StateChangeEvent 는 Redis Pub/Sub을 통해 전송되는 상태 변경 이벤트 데이터 구조입니다.
 type DeviceStateChangeEvent struct {
-	EventType     string `json:"event_type"`
-	Exten         string `json:"exten"`
-	State         string `json:"state"`
-	ConnectedLine string `json:"connected_line"`
-	Timestamp     string `json:"timestamp"`
+	EventType         string `json:"event_type"`
+	CallClass         string `json:"class"`
+	Exten             string `json:"exten"`
+	State             string `json:"state"`
+	ConnectedLineNum  string `json:"connected_line_num"`
+	ConnectedLineName string `json:"connected_line_name"`
+	Timestamp         string `json:"timestamp"`
 }
 
 type ReachableStateChangeEvent struct {
@@ -134,7 +137,6 @@ func (s *SyncService) handlerEndpointList(ctx context.Context, msg ami.Message) 
 	}
 
 	zap.S().Debugf("[EndPointList] %s : %s", device, state)
-	fmt.Println(msg)
 
 	// DeviceState 문자열을 표준 DeviceState 변환
 	deviceState := parseDeviceState(state)
@@ -172,6 +174,7 @@ func (s *SyncService) handlerEndpointList(ctx context.Context, msg ami.Message) 
 
 // handlerEndpointListComplete 장치 초기 상태 조회 완료 이벤트를 처리합니다.
 func (s *SyncService) handlerEndpointListComplete(ctx context.Context, msg ami.Message) {
+
 	listItemsStr := msg["ListItems"]
 	listItems, err := strconv.Atoi(listItemsStr)
 	if err != nil {
@@ -197,7 +200,9 @@ func (s *SyncService) handlerEndpointListComplete(ctx context.Context, msg ami.M
 
 // flushEndpointBuffer 버퍼링된 장치 정보를 한 번에 Redis에 업데이트합니다.
 func (s *SyncService) flushEndpointBuffer(ctx context.Context) {
+
 	s.bufferMu.Lock()
+
 	// 현재 버퍼 복사 및 초기화
 	buffer := s.endpointBuffer
 	s.endpointBuffer = make(map[string]EndpointData)
@@ -208,6 +213,7 @@ func (s *SyncService) flushEndpointBuffer(ctx context.Context) {
 		s.bufferTimer.Stop()
 		s.bufferTimer = nil
 	}
+
 	s.bufferMu.Unlock()
 
 	if len(buffer) == 0 {
@@ -217,13 +223,14 @@ func (s *SyncService) flushEndpointBuffer(ctx context.Context) {
 	zap.S().Infof("[SyncService] %d개의 장치 정보를 Redis에 일괄 업데이트합니다.", len(buffer))
 
 	for device, data := range buffer {
-		s.updateDeviceState(ctx, device, "", data.DeviceState)
+		s.updateDeviceState(ctx, device, "", "", data.DeviceState)
 		s.updateReachableState(ctx, device, data.ReachableState)
 	}
 }
 
 // handlerContactStateChange 장치 상태 변화(ContactStatus)의 이벤트를 처리합니다.
 func (s *SyncService) handlerContactStateChange(ctx context.Context, msg ami.Message) {
+
 	device := msg["EndpointName"]
 	state := msg["ContactStatus"]
 
@@ -244,24 +251,26 @@ func (s *SyncService) handlerContactStateChange(ctx context.Context, msg ami.Mes
 	}
 
 	// Redis에 상태 저장
-	s.updateDeviceState(ctx, device, "", deviceState)
+	s.updateDeviceState(ctx, device, "", "", deviceState)
 	s.updateReachableState(ctx, device, reachableState)
 }
 
 // handlerNewStateChange 장치의 통화 상태 변경(Newstate) 이벤트를 처리합니다.
 func (s *SyncService) handlerNewStateChange(ctx context.Context, msg ami.Message) {
+
 	exten := msg["CallerIDNum"]
 	stateStr := msg["ChannelState"]
-	connectedLine := msg["ConnectedLineNum"]
+	connectedLineNum := msg["ConnectedLineNum"]
+	connectedLineName := msg["ConnectedLineName"]
 
-	if exten == "" || stateStr == "" {
-		zap.S().Warn("[NetState] 이벤트에서 조회된 내용이 없습니다.")
+	if (exten == "" || strings.Contains(exten, "unknown")) || stateStr == "" {
+		zap.S().Warn("[NewState] 이벤트에서 조회된 내용이 없습니다.")
 		return
 	}
 
 	stateInt, err := strconv.Atoi(stateStr)
 	if err != nil {
-		zap.S().Warnf("[NetState] 채널 상태값을 숫자변 변경 중 오류 발생. %v", err)
+		zap.S().Warnf("[NewState] 채널 상태값을 숫자변 변경 중 오류 발생. %v", err)
 		return
 	}
 
@@ -273,38 +282,52 @@ func (s *SyncService) handlerNewStateChange(ctx context.Context, msg ami.Message
 	// 정수형 ChannelState를 표준 DeviceState로 변환
 	deviceState := parseChannelState(stateInt)
 
-	zap.S().Infof("[NetState %s(%s) -> %s", exten, stateInt, stateStr, deviceState)
-	s.updateDeviceState(ctx, exten, connectedLine, deviceState)
+	zap.S().Infof("[NewState] %s(%s) -> %s", exten, stateInt, stateStr, deviceState)
+	s.updateDeviceState(ctx, exten, connectedLineNum, connectedLineName, deviceState)
 }
 
 // handlerHangup 통화 종료(Hangup) 이벤트를 처리합니다.
 func (s *SyncService) handlerHangup(ctx context.Context, msg ami.Message) {
+
 	exten := msg["CallerIDNum"]
 	deviceState := msg["ChannelStateDesc"]
-	if exten == "" {
+	if exten == "" || strings.Contains(exten, "unknown") {
 		zap.S().Warnf("[Hangup] 내선번호를 추출할 수 없습니다. (Channel: %s)", msg["Channel"])
 		return
 	}
 
 	zap.S().Infof("[Hangup] %s 통화 종료 (%s)", exten, deviceState)
-	s.updateDeviceState(ctx, exten, "", DeviceStateIdle)
+	s.updateDeviceState(ctx, exten, "", "", DeviceStateIdle)
 }
 
 // updateDeviceState Redis에 장치 상태를 저장합니다.
-func (s *SyncService) updateDeviceState(ctx context.Context, exten string, connectedLine string, state DeviceState) {
+func (s *SyncService) updateDeviceState(ctx context.Context, exten string,
+	connectedLineNum string, connectedLineName string, state DeviceState) {
+
 	key := fmt.Sprintf("asterisk:exten:%s:device_state", exten)
-	if err := s.redis.HSet(ctx, key, "state", string(state), "connected_line", connectedLine).Err(); err != nil {
+	if err := s.redis.HSet(ctx, key, "state", string(state), "connected_line_num", connectedLineNum,
+		"connected_line_name", connectedLineName).Err(); err != nil {
+
 		zap.S().Errorf("[Redis] DeviceState 저장 실패 (Exten: %s, State: %s): %v", exten, state, err)
 		return
 	}
 
+	// 통화 종류 (Call Class) 설정
+	// 기본은 'Normal'로 설정하고, ConnectedLineName이 'Broadcasting'인 경우 'Broadcast'로 설정
+	callClass := "Normal"
+	if strings.Contains(connectedLineName, "Broadcasting") {
+		callClass = "Broadcast"
+	}
+
 	// 상태 변경 이벤트 발행 (Pub/Sub)
 	event := DeviceStateChangeEvent{
-		EventType:     "DeviceState",
-		Exten:         exten,
-		State:         string(state),
-		ConnectedLine: connectedLine,
-		Timestamp:     time.Now().Local().Format(time.RFC3339),
+		EventType:         "DeviceState",
+		CallClass:         callClass,
+		Exten:             exten,
+		State:             string(state),
+		ConnectedLineNum:  connectedLineNum,
+		ConnectedLineName: connectedLineName,
+		Timestamp:         time.Now().Local().Format(time.RFC3339),
 	}
 
 	payload, err := json.Marshal(event)
