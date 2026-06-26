@@ -25,6 +25,7 @@ vendor/
 
 # Logs
 logs/*
+cmd/server/logs/*
 !logs/.gitkeep
 
 # OS generated files

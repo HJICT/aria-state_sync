@@ -2,16 +2,16 @@
 # Asterisk Manager Interface (AMI)
 # ──────────────────────────────────────────────
 asterisk:
-  host: 10.10.20.203
+  host: "10.10.20.203"
   port: 5038
-  user: hjict
+  user: "state"
   pass: "${AMI_PASSWORD}"
 
 #───────────────────────────────────────────────
 # Redis
 # ──────────────────────────────────────────────
 redis:
-  host: 127.0.0.1
+  host: "10.10.20.203"
   port: 6379
   pass: "${REDIS_PASSWORD}"
 
@@ -19,9 +19,9 @@ redis:
 # Logs
 # ──────────────────────────────────────────────
 logs:
-  level: debug        # debug | info | warn | error
+  level: "debug"        # debug | info | warn | error
   path: "./logs"      # 로그 파일 저장 디렉토리
-  rotation: daily     # daily | size
+  rotation: "daily"     # daily | size
   max_size: 100       # [size 전용] 롤링 기준 파일 크기 (MB)
   max_backups: 10     # [size 전용] 보관할 롤링 파일 최대 개수
   max_age: 30         # 보관 기간 (일) — daily: 오래된 파일 삭제, size: MaxAge
