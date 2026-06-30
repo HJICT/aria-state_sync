@@ -304,22 +304,27 @@ func (s *SyncService) handlerHangup(ctx context.Context, msg ami.Message) {
 func (s *SyncService) updateDeviceState(ctx context.Context, exten string,
 	connectedLineNum string, connectedLineName string, state DeviceState) {
 
-	key := fmt.Sprintf("asterisk:exten:%s:device_state", exten)
-	if err := s.redis.HSet(ctx, key, "state", string(state), "connected_line_num", connectedLineNum,
-		"connected_line_name", connectedLineName).Err(); err != nil {
-
-		zap.S().Errorf("[Redis] DeviceState 저장 실패 (Exten: %s, State: %s): %v", exten, state, err)
-		return
-	}
-
-	// 통화 종류 (Call Class) 설정
+	// [통화 Class 설정]
 	// 기본은 'Normal'로 설정하고, ConnectedLineName이 'Broadcasting'인 경우 'Broadcast'로 설정
 	callClass := "Normal"
 	if strings.Contains(connectedLineName, "Broadcasting") {
 		callClass = "Broadcast"
 	}
 
-	// 상태 변경 이벤트 발행 (Pub/Sub)
+	// [Redis HASH 설정]
+	key := fmt.Sprintf("asterisk:exten:%s:device_state", exten)
+	err := s.redis.HSet(ctx, key,
+		"state", string(state),
+		"call_class", callClass,
+		"connected_line_num", connectedLineNum,
+		"connected_line_name", connectedLineName).Err()
+
+	if err != nil {
+		zap.S().Errorf("[Redis] DeviceState 저장 실패 (Exten: %s, State: %s): %v", exten, state, err)
+		return
+	}
+
+	// [상태 변경 이벤트 발행 (Pub/Sub)]
 	event := DeviceStateChangeEvent{
 		EventType:         "DeviceState",
 		CallClass:         callClass,
@@ -343,13 +348,16 @@ func (s *SyncService) updateDeviceState(ctx context.Context, exten string,
 
 // updateReachableState Redis에 네트워크 상태를 저장합니다.
 func (s *SyncService) updateReachableState(ctx context.Context, exten string, state ReachableState) {
+
+	// [Redis HASH 설정]
 	key := fmt.Sprintf("asterisk:exten:%s:reachability", exten)
-	if err := s.redis.HSet(ctx, key, "state", string(state)).Err(); err != nil {
+	err := s.redis.HSet(ctx, key, "state", string(state)).Err()
+	if err != nil {
 		zap.S().Errorf("[Redis] ReachableState 저장 실패 (Exten: %s, State: %s): %v", exten, state, err)
 		return
 	}
 
-	// 상태 변경 이벤트 발행 (Pub/Sub)
+	// [상태 변경 이벤트 발행 (Pub/Sub)]
 	event := ReachableStateChangeEvent{
 		EventType: "ReachableState",
 		Exten:     exten,

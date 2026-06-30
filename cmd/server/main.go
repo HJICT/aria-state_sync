@@ -5,7 +5,7 @@ import (
 	"flag"
 	"os"
 
-	"common_lib/asterisk"
+	ami "common_lib/asterisk"
 	"common_lib/logger"
 	"common_lib/redis"
 	"statesync/internal/config"
@@ -16,19 +16,19 @@ import (
 
 func main() {
 
-	// 1. 커멘드라인 파싱
+	// 커멘드라인 파싱
 	appEnv := flag.String("env", "dev", "run environment (dev / prod)")
 	configPath := flag.String("config", "", "Configuration file path (e.g., .env or configs/.env)")
 	flag.Parse()
 
-	// 2. [설정 로드] YAML 설정 파일 읽기
+	// [설정 로드] YAML 설정 파일 읽기
 	cfg, err := config.LoadConfig(*appEnv, configPath)
 	if err != nil {
 		// 로거 초기화 전이므로 표준 log 사용
 		panic(err)
 	}
 
-	// 3. [로거 초기화]
+	// [로거 초기화]
 	// 설정 로드 직후 최우선으로 로거를 초기화합니다.
 	logCfg := &logger.LogConfig{
 		Level:      cfg.Logs.Level,
@@ -44,7 +44,7 @@ func main() {
 	}
 	defer logger.Sync()
 
-	// 4. [Redis 초기화]
+	// [Redis 초기화]
 	ctx := context.Background()
 	redisClient, err := redis.NewClient(ctx, zap.S(), cfg.Redis.Host, cfg.Redis.Port, cfg.Redis.Pass)
 	if err != nil {
@@ -52,7 +52,7 @@ func main() {
 	}
 	defer redisClient.Close()
 
-	// 5. [검증 및 로그 출력] 로드된 설정 확인
+	// [검증 및 로그 출력] 로드된 설정 확인
 	zap.S().Info("=== 애플리케이션 설정 로드 완료 ===")
 	zap.S().Infof("Asterisk 서버: %s:%d", cfg.Asterisk.Host, cfg.Asterisk.Port)
 	zap.S().Infof("Asterisk 계정: %s", cfg.Asterisk.User)
@@ -65,10 +65,10 @@ func main() {
 		zap.S().Debug("Asterisk 비밀번호 검증 완료")
 	}
 
-	// 6. [Asterisk AMI 연결 설정]
+	// [Asterisk AMI 연결 설정]
 	amiClient := ami.New(ctx, zap.S(), cfg.Asterisk.Host, cfg.Asterisk.Port, cfg.Asterisk.User, cfg.Asterisk.Pass)
 
-	// 7. [서비스 초기화 및 시작]
+	// [서비스 초기화 및 시작]
 	// Asterisk와 Redis를 연결하여 상태를 동기화하는 비즈니스 로직 서비스를 초기화합니다.
 	syncService := service.NewSyncService(amiClient, redisClient)
 	syncService.Start(ctx)
