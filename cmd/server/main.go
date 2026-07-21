@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"flag"
 	"os"
 
 	ami "common_lib/asterisk"
@@ -11,15 +10,16 @@ import (
 	"statesync/internal/config"
 	"statesync/internal/service"
 
+	"github.com/spf13/pflag"
 	"go.uber.org/zap"
 )
 
 func main() {
 
 	// 커멘드라인 파싱
-	appEnv := flag.String("env", "dev", "run environment (dev / prod)")
-	configPath := flag.String("config", "", "Configuration file path (e.g., .env or configs/.env)")
-	flag.Parse()
+	appEnv := pflag.StringP("env", "e", "dev", "run environment (dev / prod)")
+	configPath := pflag.StringP("config", "c", "", "Configuration file path (e.g., .env or configs/.env)")
+	pflag.Parse()
 
 	// [설정 로드] YAML 설정 파일 읽기
 	cfg, err := config.LoadConfig(*appEnv, configPath)
