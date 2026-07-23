@@ -13,7 +13,10 @@
             "program": "${workspaceFolder}/cmd/server/main.go",
             "debugAdapter": "legacy",
             "dlvFlags": ["--only-same-user=false"],
-            "args": ["-config", "${workspaceFolder}/configs", "-env", "dev"]
+            "args": [
+                "--config", "${workspaceFolder}/configs", 
+                "--env", "dev"
+            ]
         }
     ]
 }

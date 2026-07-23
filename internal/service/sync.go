@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -54,6 +55,7 @@ type ReachableStateChangeEvent struct {
 	EventType string `json:"event_type"`
 	Exten     string `json:"exten"`
 	State     string `json:"state"`
+	IPAddress string `json:"ip_address"`
 	Timestamp string `json:"timestamp"`
 }
 
@@ -61,6 +63,7 @@ type ReachableStateChangeEvent struct {
 type EndpointData struct {
 	DeviceState    DeviceState
 	ReachableState ReachableState
+	IPAddress      string
 }
 
 // SyncService Asterisk의 상태 정보를 Redis로 동기화하는 비즈니스 로직을 담당합니다.
@@ -130,13 +133,17 @@ func (s *SyncService) Start(ctx context.Context) {
 func (s *SyncService) handlerEndpointList(ctx context.Context, msg ami.Message) {
 	device := msg["ObjectName"]
 	state := msg["DeviceState"]
+	conacts := msg["Contacts"]
 
 	if device == "" || state == "" {
 		zap.L().Warn("[EndPointList] 이벤트에서 조회된 내용이 없습니다.")
 		return
 	}
 
-	zap.S().Debugf("[EndPointList] %s : %s", device, state)
+	// IP주소 조회
+	ipaddr := extractSipIPv4(conacts)
+
+	zap.S().Debugf("[EndPointList] %s : %s(%s)", device, state, ipaddr)
 
 	// DeviceState 문자열을 표준 DeviceState 변환
 	deviceState := parseDeviceState(state)
@@ -152,6 +159,7 @@ func (s *SyncService) handlerEndpointList(ctx context.Context, msg ami.Message) 
 	s.endpointBuffer[device] = EndpointData{
 		DeviceState:    deviceState,
 		ReachableState: reachableState,
+		IPAddress:      ipaddr,
 	}
 
 	var shouldFlush bool
@@ -224,7 +232,7 @@ func (s *SyncService) flushEndpointBuffer(ctx context.Context) {
 
 	for device, data := range buffer {
 		s.updateDeviceState(ctx, device, "", "", data.DeviceState)
-		s.updateReachableState(ctx, device, data.ReachableState)
+		s.updateReachableState(ctx, device, data.ReachableState, data.IPAddress)
 	}
 }
 
@@ -233,13 +241,17 @@ func (s *SyncService) handlerContactStateChange(ctx context.Context, msg ami.Mes
 
 	device := msg["EndpointName"]
 	state := msg["ContactStatus"]
+	uri := msg["URI"]
 
 	if device == "" || state == "" {
 		zap.S().Warn("[ContactState] 이벤트에서 조회된 내용이 없습니다.")
 		return
 	}
 
-	zap.S().Infof("[ContactState] %s : %s", device, state)
+	// URI에서 IP주소 조회
+	ipv4 := extractSipIPv4(uri)
+
+	zap.S().Infof("[ContactState] %s : %s(%s)", device, state, ipv4)
 
 	// ContactStatus 문자열을 표준 ReachableState 변환
 	reachableState := parseContactState(state)
@@ -252,7 +264,7 @@ func (s *SyncService) handlerContactStateChange(ctx context.Context, msg ami.Mes
 
 	// Redis에 상태 저장
 	s.updateDeviceState(ctx, device, "", "", deviceState)
-	s.updateReachableState(ctx, device, reachableState)
+	s.updateReachableState(ctx, device, reachableState, ipv4)
 }
 
 // handlerNewStateChange 장치의 통화 상태 변경(Newstate) 이벤트를 처리합니다.
@@ -347,11 +359,15 @@ func (s *SyncService) updateDeviceState(ctx context.Context, exten string,
 }
 
 // updateReachableState Redis에 네트워크 상태를 저장합니다.
-func (s *SyncService) updateReachableState(ctx context.Context, exten string, state ReachableState) {
+func (s *SyncService) updateReachableState(ctx context.Context,
+	exten string, state ReachableState, ipaddr string) {
 
 	// [Redis HASH 설정]
 	key := fmt.Sprintf("asterisk:exten:%s:reachability", exten)
-	err := s.redis.HSet(ctx, key, "state", string(state)).Err()
+	err := s.redis.HSet(ctx, key,
+		"state", string(state),
+		"ip_address", ipaddr).Err()
+
 	if err != nil {
 		zap.S().Errorf("[Redis] ReachableState 저장 실패 (Exten: %s, State: %s): %v", exten, state, err)
 		return
@@ -362,6 +378,7 @@ func (s *SyncService) updateReachableState(ctx context.Context, exten string, st
 		EventType: "ReachableState",
 		Exten:     exten,
 		State:     string(state),
+		IPAddress: ipaddr,
 		Timestamp: time.Now().Local().Format(time.RFC3339),
 	}
 
@@ -426,4 +443,36 @@ func parseChannelState(state int) DeviceState {
 	default:
 		return DeviceStateUnknown
 	}
+}
+
+// extractSipIPv4는 `sip:` 뒤에 오는 IPv4 주소를 반환.
+func extractSipIPv4(s string) string {
+	// `sip:`뒤에 오는 IPv4 패턴 탐색
+	ipPattern := `(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)`
+	re := regexp.MustCompile(`sip:(?:[^@]+@)?(` + ipPattern + `)`)
+
+	// ip 확인
+	matches := re.FindStringSubmatch(s)
+
+	if len(matches) <= 0 {
+		return ""
+	}
+
+	return matches[1]
+}
+
+// extractIPv4ByField는 지정한 필드명(fieldName)에 해당하는 IP 주소를 반환.
+func extractIPv4ByField(s string, fieldName string) string {
+	// 필드명 뒤에 "="가 붙고 그 뒤에 IPv4 주소가 오는 패턴
+	ipPattern := `(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)`
+	pattern := fmt.Sprintf(`%s[=:](%s)`, regexp.QuoteMeta(fieldName), ipPattern)
+
+	re := regexp.MustCompile(pattern)
+	matches := re.FindStringSubmatch(s)
+
+	if len(matches) <= 0 {
+		return ""
+	}
+
+	return matches[1]
 }
