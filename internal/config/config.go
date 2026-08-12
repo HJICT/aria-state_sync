@@ -89,7 +89,11 @@ func LoadConfig(appEnv string, configPath *string) (*Config, error) {
 		val := v.Get(key)
 		if s, ok := val.(string); ok {
 			if strings.Contains(s, "${") {
-				v.Set(key, os.ExpandEnv(s))
+				expanded := os.ExpandEnv(s)
+				if strings.Contains(expanded, "${") {
+					return nil, fmt.Errorf("설정 값(%s)의 환경 변수가 치환되지 않았습니다: %s", key, s)
+				}
+				v.Set(key, expanded)
 			}
 		}
 	}

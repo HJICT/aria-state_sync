@@ -40,6 +40,14 @@ const (
 	ReachableStateUnknown     ReachableState = "Unknown"
 )
 
+// Asterisk AMI ChannelState 정수값 (https://docs.asterisk.org/Asterisk_20_Documentation/API_Documentation/AMI_Events/Newstate/)
+const (
+	chanStateRing    = 4 // Ring
+	chanStateRinging = 5 // Ringing
+	chanStateUp      = 6 // Up
+	chanStateBusy    = 7 // Busy
+)
+
 // StateChangeEvent 는 Redis Pub/Sub을 통해 전송되는 상태 변경 이벤트 데이터 구조입니다.
 type DeviceStateChangeEvent struct {
 	EventType         string `json:"event_type"`
@@ -287,14 +295,14 @@ func (s *SyncService) handlerNewStateChange(ctx context.Context, msg ami.Message
 	}
 
 	// 이벤트 필터링 (Ring, Ringing, Up, Busy 만 처리)
-	if !slices.Contains([]int{4, 5, 6, 7}, stateInt) {
+	if !slices.Contains([]int{chanStateRing, chanStateRinging, chanStateUp, chanStateBusy}, stateInt) {
 		return
 	}
 
 	// 정수형 ChannelState를 표준 DeviceState로 변환
 	deviceState := parseChannelState(stateInt)
 
-	zap.S().Infof("[NewState] %s(%s) -> %s", exten, stateInt, stateStr, deviceState)
+	zap.S().Infof("[NewState] %s(%s) -> %s", exten, stateStr, deviceState)
 	s.updateDeviceState(ctx, exten, connectedLineNum, connectedLineName, deviceState)
 }
 
@@ -347,15 +355,7 @@ func (s *SyncService) updateDeviceState(ctx context.Context, exten string,
 		Timestamp:         time.Now().Local().Format(time.RFC3339),
 	}
 
-	payload, err := json.Marshal(event)
-	if err != nil {
-		zap.S().Errorf("[Redis] DeviceState 이벤트 직렬화 실패: %v", err)
-		return
-	}
-
-	if err := s.redis.Publish(ctx, "asterisk:device_state", payload).Err(); err != nil {
-		zap.S().Errorf("[Redis] DeviceState 이벤트 발행 실패 (Channel: asterisk:device_state): %v", err)
-	}
+	s.publishEvent(ctx, "asterisk:device_state", "DeviceState", event)
 }
 
 // updateReachableState Redis에 네트워크 상태를 저장합니다.
@@ -382,14 +382,19 @@ func (s *SyncService) updateReachableState(ctx context.Context,
 		Timestamp: time.Now().Local().Format(time.RFC3339),
 	}
 
+	s.publishEvent(ctx, "asterisk:reachable_state", "ReachableState", event)
+}
+
+// publishEvent 이벤트를 직렬화하여 지정된 채널에 발행합니다.
+func (s *SyncService) publishEvent(ctx context.Context, channel string, eventName string, event any) {
 	payload, err := json.Marshal(event)
 	if err != nil {
-		zap.S().Errorf("[Redis] ReachableState 이벤트 직렬화 실패: %v", err)
+		zap.S().Errorf("[Redis] %s 이벤트 직렬화 실패: %v", eventName, err)
 		return
 	}
 
-	if err := s.redis.Publish(ctx, "asterisk:reachable_state", payload).Err(); err != nil {
-		zap.S().Errorf("[Redis] ReachableState 이벤트 발행 실패 (Channel: asterisk:reachable_state): %v", err)
+	if err := s.redis.Publish(ctx, channel, payload).Err(); err != nil {
+		zap.S().Errorf("[Redis] %s 이벤트 발행 실패 (Channel: %s): %v", eventName, channel, err)
 	}
 }
 
@@ -434,11 +439,11 @@ func parseContactState(state string) ReachableState {
 // parseChannelState 정수형 ChannelState를 표준 DeviceState로 변환합니다.
 func parseChannelState(state int) DeviceState {
 	switch state {
-	case 4, 5: // Ring, Ringing
+	case chanStateRing, chanStateRinging:
 		return DeviceStateRinging
-	case 6: // Up
+	case chanStateUp:
 		return DeviceStateUse
-	case 7: // Busy
+	case chanStateBusy:
 		return DeviceStateBusy
 	default:
 		return DeviceStateUnknown
@@ -452,22 +457,6 @@ func extractSipIPv4(s string) string {
 	re := regexp.MustCompile(`sip:(?:[^@]+@)?(` + ipPattern + `)`)
 
 	// ip 확인
-	matches := re.FindStringSubmatch(s)
-
-	if len(matches) <= 0 {
-		return ""
-	}
-
-	return matches[1]
-}
-
-// extractIPv4ByField는 지정한 필드명(fieldName)에 해당하는 IP 주소를 반환.
-func extractIPv4ByField(s string, fieldName string) string {
-	// 필드명 뒤에 "="가 붙고 그 뒤에 IPv4 주소가 오는 패턴
-	ipPattern := `(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)`
-	pattern := fmt.Sprintf(`%s[=:](%s)`, regexp.QuoteMeta(fieldName), ipPattern)
-
-	re := regexp.MustCompile(pattern)
 	matches := re.FindStringSubmatch(s)
 
 	if len(matches) <= 0 {

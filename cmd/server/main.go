@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"os"
+	"os/signal"
+	"syscall"
 
 	ami "common_lib/asterisk"
 	"common_lib/logger"
@@ -45,7 +47,8 @@ func main() {
 	defer logger.Sync()
 
 	// [Redis 초기화]
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	redisClient, err := redis.NewClient(ctx, zap.S(), cfg.Redis.Host, cfg.Redis.Port, cfg.Redis.Pass)
 	if err != nil {
 		zap.S().Fatalf("Redis 초기화 실패: %v", err)
@@ -57,13 +60,6 @@ func main() {
 	zap.S().Infof("Asterisk 서버: %s:%d", cfg.Asterisk.Host, cfg.Asterisk.Port)
 	zap.S().Infof("Asterisk 계정: %s", cfg.Asterisk.User)
 	zap.S().Infof("Redis 서버:    %s:%d", cfg.Redis.Host, cfg.Redis.Port)
-
-	// 환경 변수 치환 여부 확인 (AMI 비밀번호가 성공적으로 로드되었는지 검증)
-	if cfg.Asterisk.Pass != "" && !isValidExpansion(os.ExpandEnv("${AMI_PASSWORD}"), cfg.Asterisk.Pass) {
-		zap.S().Warn("Asterisk 비밀번호가 환경 변수에서 올바르게 치환되지 않았을 수 있습니다.")
-	} else if cfg.Asterisk.Pass != "" {
-		zap.S().Debug("Asterisk 비밀번호 검증 완료")
-	}
 
 	// [Asterisk AMI 연결 설정]
 	amiClient := ami.New(ctx, zap.S(), cfg.Asterisk.Host, cfg.Asterisk.Port, cfg.Asterisk.User, cfg.Asterisk.Pass)
@@ -83,11 +79,7 @@ func main() {
 
 	zap.S().Info("모든 초기화가 완료되었습니다. 서버가 가동 중입니다.")
 
-	// 서버가 계속 실행되도록 대기 (향후 시그널 처리 등으로 대체 가능)
-	select {}
-}
-
-// isValidExpansion 치환된 값과 실제 값이 일치하는지 확인하는 보조 함수입니다.
-func isValidExpansion(expanded, actual string) bool {
-	return expanded == actual
+	// SIGINT/SIGTERM 수신 시까지 대기 후 정상 종료(defer된 리소스 정리 수행)
+	<-ctx.Done()
+	zap.S().Info("종료 신호를 수신했습니다. 정상 종료를 시작합니다.")
 }
