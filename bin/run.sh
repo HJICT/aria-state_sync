@@ -15,13 +15,13 @@ else
 fi
 
 APP_NAME="state-sync"
-BIN_FILE="$PROJECT_ROOT/bin/$APP_NAME"
+BIN_FILE="$PROJECT_ROOT/$APP_NAME"
 PID_DIR="$PROJECT_ROOT/run"
 PID_FILE="$PID_DIR/$APP_NAME.pid"
 LOG_DIR="$PROJECT_ROOT/logs"
 LOG_FILE="$LOG_DIR/nohup.log"
 
-DEFAULT_ENV="dev"
+DEFAULT_ENV="prod"
 APP_ENV=""
 CONFIG_PATH=""
 COMMAND=""
@@ -37,7 +37,7 @@ Commands:
   status          Show application running status
 
 Options:
-  -e, --env <env>          Runtime environment (e.g., dev, prod) [default: dev]
+  -e, --env <env>          Runtime environment (e.g., dev, prod) [default: prod]
   -c, --config <path>      Configuration directory or file path
   -h, --help               Display this help message
 

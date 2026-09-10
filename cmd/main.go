@@ -23,7 +23,7 @@ func main() {
 	// Command line parsing
 	showVersion := pflag.BoolP("version", "v", false, "Show version information and exit")
 	appEnv := pflag.StringP("env", "e", "dev", "run environment (dev / prod)")
-	configPath := pflag.StringP("config", "c", "", "Configuration file path (e.g., .env or configs/.env)")
+	configPath := pflag.StringP("config", "c", "config/", "Configuration file path (e.g., .env or configs/.env)")
 	pflag.Parse()
 
 	if *showVersion {
@@ -32,7 +32,7 @@ func main() {
 	}
 
 	// [설정 로드] YAML 설정 파일 읽기
-	cfg, err := config.LoadConfig(*appEnv, configPath)
+	cfg, err := config.LoadConfig(*appEnv, *configPath)
 	if err != nil {
 		// 로거 초기화 전이므로 표준 log 사용
 		panic(err)

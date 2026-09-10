@@ -34,7 +34,7 @@ logs:
 		t.Fatalf("failed to write config.dev.yaml: %v", err)
 	}
 
-	cfg, err := LoadConfig("dev", &tempDir)
+	cfg, err := LoadConfig("dev", tempDir)
 	if err != nil {
 		t.Fatalf("LoadConfig failed: %v", err)
 	}
@@ -62,7 +62,7 @@ logs:
 		t.Fatalf("failed to write config.dev.yaml: %v", err)
 	}
 
-	cfg, err = LoadConfig("dev", &tempDir)
+	cfg, err = LoadConfig("dev", tempDir)
 	if err != nil {
 		t.Fatalf("LoadConfig failed: %v", err)
 	}
@@ -89,11 +89,46 @@ logs:
 		t.Fatalf("failed to write config.dev.yaml: %v", err)
 	}
 
-	cfg, err = LoadConfig("dev", &tempDir)
+	cfg, err = LoadConfig("dev", tempDir)
 	if err != nil {
 		t.Fatalf("LoadConfig failed: %v", err)
 	}
 	if cfg.Logs.Console != nil {
 		t.Errorf("expected Logs.Console to be nil when omitted, got %v", *cfg.Logs.Console)
+	}
+}
+
+func TestLoadConfig_MissingEnvVar(t *testing.T) {
+	tempDir := t.TempDir()
+
+	os.Unsetenv("REDIS_PASSWORD")
+	os.Unsetenv("AMI_PASSWORD")
+
+	// Missing REDIS_PASSWORD in .env
+	envContent := "AMI_PASSWORD=secret\n"
+	if err := os.WriteFile(filepath.Join(tempDir, ".env.dev"), []byte(envContent), 0644); err != nil {
+		t.Fatalf("failed to write .env.dev: %v", err)
+	}
+
+	yaml := `
+asterisk:
+  host: "localhost"
+  port: 5038
+  user: "test"
+  pass: "${AMI_PASSWORD}"
+redis:
+  host: "localhost"
+  port: 6379
+  pass: "${REDIS_PASSWORD}"
+logs:
+  level: "info"
+`
+	if err := os.WriteFile(filepath.Join(tempDir, "config.dev.yaml"), []byte(yaml), 0644); err != nil {
+		t.Fatalf("failed to write config.dev.yaml: %v", err)
+	}
+
+	_, err := LoadConfig("dev", tempDir)
+	if err == nil {
+		t.Fatalf("expected error due to missing REDIS_PASSWORD, but got nil")
 	}
 }
