@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -16,12 +17,25 @@ import (
 	"go.uber.org/zap"
 )
 
+// Version information injected at build time via ldflags
+var (
+	Version   = "dev"
+	GitCommit = "none"
+	BuildTime = "unknown"
+)
+
 func main() {
 
-	// 커멘드라인 파싱
+	// Command line parsing
+	showVersion := pflag.BoolP("version", "v", false, "Show version information and exit")
 	appEnv := pflag.StringP("env", "e", "dev", "run environment (dev / prod)")
 	configPath := pflag.StringP("config", "c", "", "Configuration file path (e.g., .env or configs/.env)")
 	pflag.Parse()
+
+	if *showVersion {
+		fmt.Printf("StateSync Version: %s\nGit Commit: %s\nBuild Time: %s\n", Version, GitCommit, BuildTime)
+		os.Exit(0)
+	}
 
 	// [설정 로드] YAML 설정 파일 읽기
 	cfg, err := config.LoadConfig(*appEnv, configPath)
@@ -34,6 +48,7 @@ func main() {
 	// 설정 로드 직후 최우선으로 로거를 초기화합니다.
 	logCfg := &logger.LogConfig{
 		Level:      cfg.Logs.Level,
+		Console:    cfg.Logs.Console,
 		Path:       cfg.Logs.Path,
 		Rotation:   cfg.Logs.Rotation,
 		MaxSize:    cfg.Logs.MaxSize,
@@ -45,6 +60,8 @@ func main() {
 		panic(err)
 	}
 	defer logger.Sync()
+
+	zap.S().Infof("=== StateSync v%s (commit: %s, build: %s) ===", Version, GitCommit, BuildTime)
 
 	// [Redis 초기화]
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

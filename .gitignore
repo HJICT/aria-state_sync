@@ -1,10 +1,15 @@
 # Binaries
+bin/*
+!bin/run.sh
 statesync-server
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
+
+# Runtime & PID
+run/
 
 # Test binaries and coverage
 *.test
@@ -36,3 +41,8 @@ cmd/server/logs/*
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Configuration files
+config/config.dev.yaml
+config/config.prod.yaml
+config/.env*

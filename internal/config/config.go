@@ -35,6 +35,7 @@ type RedisConfig struct {
 // LogConfig 애플리케이션 로그 기록 및 관리 정책 설정입니다.
 type LogConfig struct {
 	Level      string `mapstructure:"level"`       // 로그 레벨 (debug, info, warn, error)
+	Console    *bool  `mapstructure:"console"`     // 콘솔(Stdout) 출력 여부 (미지정 시 기본값: true)
 	Path       string `mapstructure:"path"`        // 로그 파일 저장 경로
 	Rotation   string `mapstructure:"rotation"`    // 로그 롤링 방식 (daily, size)
 	MaxSize    int    `mapstructure:"max_size"`    // 파일당 최대 크기 (MB)
