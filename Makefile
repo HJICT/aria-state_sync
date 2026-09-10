@@ -4,11 +4,12 @@ BINARY_NAME=state-sync
 MAIN_FILE=./cmd/main.go
 
 # Version configuration (injected via -ldflags)
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+VERSION_PKG=statesync/internal/version
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "1.0.0")
 GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-BUILD_TIME ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
+BUILD_DATE ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 
-LDFLAGS = -X 'main.Version=$(VERSION)' -X 'main.GitCommit=$(GIT_COMMIT)' -X 'main.BuildTime=$(BUILD_TIME)'
+LDFLAGS = -X '$(VERSION_PKG).Version=$(VERSION)' -X '$(VERSION_PKG).GitCommit=$(GIT_COMMIT)' -X '$(VERSION_PKG).BuildDate=$(BUILD_DATE)'
 
 .PHONY: all build clean help version
 
@@ -17,7 +18,7 @@ all: build
 
 ## build: Build the binary with version information.
 build:
-	@echo "⚙️  Building $(BINARY_NAME) (Version: $(VERSION), Commit: $(GIT_COMMIT), BuildTime: $(BUILD_TIME))..."
+	@echo "⚙️  Building $(BINARY_NAME) (Version: $(VERSION), Commit: $(GIT_COMMIT), BuildDate: $(BUILD_DATE))..."
 	@mkdir -p $(BUILD_DIR)
 	go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY_NAME) $(MAIN_FILE)
 
@@ -25,7 +26,7 @@ build:
 version:
 	@echo "Version:    $(VERSION)"
 	@echo "Git Commit: $(GIT_COMMIT)"
-	@echo "Build Time: $(BUILD_TIME)"
+	@echo "Build Date: $(BUILD_DATE)"
 
 ## clean: Remove built binary.
 clean:

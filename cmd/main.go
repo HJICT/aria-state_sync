@@ -12,16 +12,10 @@ import (
 	"common_lib/redis"
 	"statesync/internal/config"
 	"statesync/internal/service"
+	"statesync/internal/version"
 
 	"github.com/spf13/pflag"
 	"go.uber.org/zap"
-)
-
-// Version information injected at build time via ldflags
-var (
-	Version   = "dev"
-	GitCommit = "none"
-	BuildTime = "unknown"
 )
 
 func main() {
@@ -33,7 +27,7 @@ func main() {
 	pflag.Parse()
 
 	if *showVersion {
-		fmt.Printf("StateSync Version: %s\nGit Commit: %s\nBuild Time: %s\n", Version, GitCommit, BuildTime)
+		fmt.Println(version.Info())
 		os.Exit(0)
 	}
 
@@ -61,7 +55,7 @@ func main() {
 	}
 	defer logger.Sync()
 
-	zap.S().Infof("=== StateSync v%s (commit: %s, build: %s) ===", Version, GitCommit, BuildTime)
+	zap.S().Infof("=== %s ===", version.Info())
 
 	// [Redis 초기화]
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
