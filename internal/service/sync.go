@@ -64,6 +64,7 @@ type ReachableStateChangeEvent struct {
 	Exten     string `json:"exten"`
 	State     string `json:"state"`
 	IPAddress string `json:"ip_address"`
+	UserAgent string `json:"user_agent"`
 	Timestamp string `json:"timestamp"`
 }
 
@@ -72,24 +73,33 @@ type EndpointData struct {
 	DeviceState    DeviceState
 	ReachableState ReachableState
 	IPAddress      string
+	UserAgent      string
 }
 
 // SyncService Asterisk의 상태 정보를 Redis로 동기화하는 비즈니스 로직을 담당합니다.
 type SyncService struct {
-	ami   *ami.AmiClient
-	redis *redis.RedisClient
+	ami          *ami.AmiClient
+	redis        *redis.RedisClient
+	syncInterval time.Duration
 
-	bufferMu       sync.Mutex
-	endpointBuffer map[string]EndpointData
-	bufferTimer    *time.Timer
-	expectedItems  int
+	bufferMu          sync.Mutex
+	endpointBuffer    map[string]EndpointData
+	bufferTimer       *time.Timer
+	expectedItems     int
+	contactsRequested bool
+
+	contactSyncTimer *time.Timer
 }
 
 // NewSyncService 새로운 SyncService 인스턴스를 생성합니다.
-func NewSyncService(ami *ami.AmiClient, redis *redis.RedisClient) *SyncService {
+func NewSyncService(ami *ami.AmiClient, redis *redis.RedisClient, syncInterval time.Duration) *SyncService {
+	if syncInterval <= 0 {
+		syncInterval = time.Hour
+	}
 	return &SyncService{
 		ami:            ami,
 		redis:          redis,
+		syncInterval:   syncInterval,
 		endpointBuffer: make(map[string]EndpointData),
 	}
 }
@@ -98,14 +108,24 @@ func NewSyncService(ami *ami.AmiClient, redis *redis.RedisClient) *SyncService {
 func (s *SyncService) Start(ctx context.Context) {
 	zap.S().Info("[SyncService] Asterisk-Redis 상태 동기화 서비스를 시작합니다.")
 
-	// EndpointList 이벤트 처리 (초기 상태 정보 조회)
+	// EndpointList 이벤트 처리 (초기 및 주기 상태 정보 조회)
 	s.ami.SubscribeEvent("EndpointList", func(msg ami.Message) {
 		s.handlerEndpointList(ctx, msg)
 	})
 
-	// EndpointListComplete 이벤트 처리 (초기 상태 정보 조회 완료)
+	// EndpointListComplete 이벤트 처리 (Endpoint 상태 정보 조회 완료)
 	s.ami.SubscribeEvent("EndpointListComplete", func(msg ami.Message) {
 		s.handlerEndpointListComplete(ctx, msg)
+	})
+
+	// ContactList 이벤트 처리 (Contact 및 UserAgent 정보 수신)
+	s.ami.SubscribeEvent("ContactList", func(msg ami.Message) {
+		s.handlerContactList(ctx, msg)
+	})
+
+	// ContactListComplete 이벤트 처리 (Contact 정보 조회 완료)
+	s.ami.SubscribeEvent("ContactListComplete", func(msg ami.Message) {
+		s.handlerContactListComplete(ctx, msg)
 	})
 
 	// ContactStatus 이벤트 처리 (장치 상태 변경 감지)
@@ -125,16 +145,46 @@ func (s *SyncService) Start(ctx context.Context) {
 
 	// AMI 재연결 시 초기 동기화 처리
 	s.ami.SubscribeEvent("_ClientConnected", func(msg ami.Message) {
-		zap.S().Info("[SyncService] AMI 재연결 감지. 전체 상태 동기화 요청(PJSIPShowEndpoints)을 전송합니다.")
-
-		_, err := s.ami.Action(ami.Message{
-			"Action": "PJSIPShowEndpoints",
-		})
-
-		if err != nil {
-			zap.S().Errorf("[SyncService] PJSIPShowEndpoints 요청 실패: %v", err)
-		}
+		zap.S().Info("[SyncService] AMI 연결 감지. 전체 상태 동기화를 시작합니다.")
+		s.triggerFullSync(ctx)
 	})
+
+	// 주기적 전체 동기화 타이머 고루틴 시작
+	go s.startPeriodicSync(ctx)
+}
+
+// startPeriodicSync 설정된 주기마다 전체 동기화 및 삭제 단말 정리를 실행합니다.
+func (s *SyncService) startPeriodicSync(ctx context.Context) {
+	ticker := time.NewTicker(s.syncInterval)
+	defer ticker.Stop()
+
+	zap.S().Infof("[SyncService] 주기적 동기화 타이머가 시작되었습니다 (간격: %v).", s.syncInterval)
+
+	for {
+		select {
+		case <-ctx.Done():
+			zap.S().Info("[SyncService] 주기적 동기화 고루틴을 종료합니다.")
+			return
+		case <-ticker.C:
+			zap.S().Infof("[SyncService] 주기적 동기화 시간(%v) 도래. 전체 상태 동기화 및 삭제 단말 정리를 실행합니다.", s.syncInterval)
+			s.triggerFullSync(ctx)
+		}
+	}
+}
+
+// triggerFullSync 전체 상태 동기화 요청(PJSIPShowEndpoints)을 전송합니다.
+func (s *SyncService) triggerFullSync(ctx context.Context) {
+	s.bufferMu.Lock()
+	s.contactsRequested = false
+	s.bufferMu.Unlock()
+
+	zap.S().Info("[SyncService] 전체 상태 동기화 요청(PJSIPShowEndpoints)을 전송합니다.")
+	_, err := s.ami.Action(ami.Message{
+		"Action": "PJSIPShowEndpoints",
+	})
+	if err != nil {
+		zap.S().Errorf("[SyncService] PJSIPShowEndpoints 요청 실패: %v", err)
+	}
 }
 
 // handlerEndpointList 장치의 초기 상태 정보 이벤트를 처리 합니다.
@@ -164,19 +214,21 @@ func (s *SyncService) handlerEndpointList(ctx context.Context, msg ami.Message) 
 
 	s.bufferMu.Lock()
 	// 버퍼에 데이터 저장
-	s.endpointBuffer[device] = EndpointData{
-		DeviceState:    deviceState,
-		ReachableState: reachableState,
-		IPAddress:      ipaddr,
+	data := s.endpointBuffer[device]
+	data.DeviceState = deviceState
+	data.ReachableState = reachableState
+	if ipaddr != "" {
+		data.IPAddress = ipaddr
 	}
+	s.endpointBuffer[device] = data
 
 	var shouldFlush bool
 	if s.expectedItems > 0 && len(s.endpointBuffer) >= s.expectedItems {
 		shouldFlush = true
 	} else if s.bufferTimer == nil {
-		// 첫 데이터 수신 시 3초 타이머 시작 (이벤트 누락 대비)
-		s.bufferTimer = time.AfterFunc(3*time.Second, func() {
-			zap.S().Warn("[SyncService] EndpointList 수신 타임아웃(3초). 수신된 정보만 업데이트합니다.")
+		// 첫 데이터 수신 시 5초 타이머 시작 (이벤트 누락 대비)
+		s.bufferTimer = time.AfterFunc(5*time.Second, func() {
+			zap.S().Warn("[SyncService] EndpointList 수신 타임아웃(5초). 수신된 정보만 업데이트합니다.")
 			s.flushEndpointBuffer(ctx)
 		})
 	}
@@ -201,30 +253,28 @@ func (s *SyncService) handlerEndpointListComplete(ctx context.Context, msg ami.M
 
 	s.bufferMu.Lock()
 	s.expectedItems = listItems
-	// 현재 버퍼 개수와 기대 개수 비교
 	shouldFlush := len(s.endpointBuffer) >= s.expectedItems
 	currentCount := len(s.endpointBuffer)
 	s.bufferMu.Unlock()
 
 	if shouldFlush {
-		zap.S().Infof("[EndPointListComplete] 모든 장치(%d개) 수신 확인. 업데이트를 시작합니다.", listItems)
+		zap.S().Infof("[EndPointListComplete] 모든 장치(%d개) 수신 확인. Redis 업데이트를 시작합니다.", listItems)
 		s.flushEndpointBuffer(ctx)
 	} else {
 		zap.S().Infof("[EndPointListComplete] 데이터 수신 대기 (기대: %d, 현재: %d). 완료 시까지 기다립니다.", listItems, currentCount)
 	}
 }
 
-// flushEndpointBuffer 버퍼링된 장치 정보를 한 번에 Redis에 업데이트합니다.
+// flushEndpointBuffer EndpointList에서 조회된 단말 기준으로 Redis를 업데이트하고, 삭제된 단말을 제거한 뒤 ContactList 조회를 요청합니다.
 func (s *SyncService) flushEndpointBuffer(ctx context.Context) {
 
 	s.bufferMu.Lock()
 
-	// 현재 버퍼 복사 및 초기화
 	buffer := s.endpointBuffer
 	s.endpointBuffer = make(map[string]EndpointData)
 	s.expectedItems = 0
+	s.contactsRequested = false
 
-	// 타이머가 실행 중인 경우(타임아웃으로 호출된 경우 등) 정리
 	if s.bufferTimer != nil {
 		s.bufferTimer.Stop()
 		s.bufferTimer = nil
@@ -236,12 +286,121 @@ func (s *SyncService) flushEndpointBuffer(ctx context.Context) {
 		return
 	}
 
-	zap.S().Infof("[SyncService] %d개의 장치 정보를 Redis에 일괄 업데이트합니다.", len(buffer))
+	// 1. Asterisk에서 삭제된 단말 제거 (Redis 키 삭제)
+	s.cleanupDeletedEndpoints(ctx, buffer)
+
+	// 2. EndpointList에서 조회된 단말 기준으로 Redis 업데이트
+	zap.S().Infof("[SyncService] %d개의 단말 정보를 Redis에 업데이트합니다.", len(buffer))
 
 	for device, data := range buffer {
 		s.updateDeviceState(ctx, device, "", "", data.DeviceState)
-		s.updateReachableState(ctx, device, data.ReachableState, data.IPAddress)
+
+		// 기존 Redis에 저장되어 있는 UserAgent 유지 (ContactList 조회 전 정보 유실 방지)
+		ua := data.UserAgent
+		if ua == "" {
+			if prevUA, err := s.redis.HGet(ctx, fmt.Sprintf("asterisk:exten:%s:reachability", device), "user_agent").Result(); err == nil {
+				ua = prevUA
+			}
+		}
+		s.updateReachableState(ctx, device, data.ReachableState, data.IPAddress, ua)
 	}
+
+	// 3. 이후 ContactList로 UserAgent 값을 업데이트
+	s.requestContacts(ctx)
+}
+
+// cleanupDeletedEndpoints Asterisk에서 삭제된 단말을 감지하여 Redis에서 해당 키를 제거합니다.
+func (s *SyncService) cleanupDeletedEndpoints(ctx context.Context, currentEndpoints map[string]EndpointData) {
+	// Redis에 등록된 모든 asterisk:exten:* 키 조회
+	keys, err := s.redis.Keys(ctx, "asterisk:exten:*").Result()
+	if err != nil {
+		zap.S().Warnf("[SyncService] 삭제 단말 정리 중 Redis 키 조회 실패: %v", err)
+		return
+	}
+
+	deletedExtens := make(map[string]struct{})
+	for _, key := range keys {
+		// key 포맷: asterisk:exten:{exten}:device_state, asterisk:exten:{exten}:reachability
+		parts := strings.Split(key, ":")
+		if len(parts) >= 3 && parts[0] == "asterisk" && parts[1] == "exten" {
+			exten := parts[2]
+			if _, exists := currentEndpoints[exten]; !exists {
+				deletedExtens[exten] = struct{}{}
+			}
+		}
+	}
+
+	if len(deletedExtens) == 0 {
+		return
+	}
+
+	for exten := range deletedExtens {
+		deviceKey := fmt.Sprintf("asterisk:exten:%s:device_state", exten)
+		reachKey := fmt.Sprintf("asterisk:exten:%s:reachability", exten)
+
+		s.redis.Del(ctx, deviceKey, reachKey)
+		zap.S().Infof("[SyncService] 삭제된 단말 정리 완료: exten=%s (Redis 키 제거)", exten)
+	}
+
+	zap.S().Infof("[SyncService] 총 %d개의 삭제된 단말 키를 Redis에서 제거했습니다.", len(deletedExtens))
+}
+
+// requestContacts Contact 및 UserAgent 조회를 위해 PJSIPShowContacts 액션을 전송합니다.
+func (s *SyncService) requestContacts(ctx context.Context) {
+	s.bufferMu.Lock()
+	if s.contactsRequested {
+		s.bufferMu.Unlock()
+		return
+	}
+	s.contactsRequested = true
+	s.bufferMu.Unlock()
+
+	zap.S().Info("[SyncService] Contact 목록(PJSIPShowContacts) 조회를 요청하여 UserAgent를 업데이트합니다.")
+
+	_, err := s.ami.Action(ami.Message{
+		"Action": "PJSIPShowContacts",
+	})
+	if err != nil {
+		zap.S().Errorf("[SyncService] PJSIPShowContacts 요청 실패: %v", err)
+	}
+}
+
+// handlerContactList Contact 정보(UserAgent, IP 등) 이벤트를 수신하여 Redis의 UserAgent 값을 업데이트합니다.
+func (s *SyncService) handlerContactList(ctx context.Context, msg ami.Message) {
+	endpoint := msg["Endpoint"]
+	userAgent := msg["UserAgent"]
+	viaAddr := msg["ViaAddr"]
+	uri := msg["Uri"]
+
+	if endpoint == "" {
+		return
+	}
+
+	zap.S().Debugf("[ContactList] %s : UA(%s), Via(%s)", endpoint, userAgent, viaAddr)
+
+	if userAgent != "" {
+		reachKey := fmt.Sprintf("asterisk:exten:%s:reachability", endpoint)
+		// Redis에 해당 단말 키가 존재하는 경우 UserAgent 업데이트
+		if s.redis.Exists(ctx, reachKey).Val() > 0 {
+			fields := []any{"user_agent", userAgent}
+			if viaAddr != "" {
+				fields = append(fields, "ip_address", viaAddr)
+			} else if uri != "" {
+				if ip := extractSipIPv4(uri); ip != "" {
+					fields = append(fields, "ip_address", ip)
+				}
+			}
+			if err := s.redis.HSet(ctx, reachKey, fields...).Err(); err != nil {
+				zap.S().Errorf("[Redis] ContactList UserAgent 갱신 실패 (exten: %s): %v", endpoint, err)
+			}
+		}
+	}
+}
+
+// handlerContactListComplete Contact 조회 완료 이벤트를 처리합니다.
+func (s *SyncService) handlerContactListComplete(ctx context.Context, msg ami.Message) {
+	listItems := msg["ListItems"]
+	zap.S().Infof("[ContactListComplete] Contact 목록 수신 완료 (등록된 Contact: %s개). UserAgent 업데이트 완료.", listItems)
 }
 
 // handlerContactStateChange 장치 상태 변화(ContactStatus)의 이벤트를 처리합니다.
@@ -259,8 +418,6 @@ func (s *SyncService) handlerContactStateChange(ctx context.Context, msg ami.Mes
 	// URI에서 IP주소 조회
 	ipv4 := extractSipIPv4(uri)
 
-	zap.S().Infof("[ContactState] %s : %s(%s)", device, state, ipv4)
-
 	// ContactStatus 문자열을 표준 ReachableState 변환
 	reachableState := parseContactState(state)
 
@@ -270,9 +427,37 @@ func (s *SyncService) handlerContactStateChange(ctx context.Context, msg ami.Mes
 		deviceState = DeviceStateUnavailable
 	}
 
+	// 기존 Redis에 저장된 user_agent 확인
+	prevUA, _ := s.redis.HGet(ctx, fmt.Sprintf("asterisk:exten:%s:reachability", device), "user_agent").Result()
+
+	zap.S().Infof("[ContactState] %s : %s(%s, UA: %s)", device, state, ipv4, prevUA)
+
 	// Redis에 상태 저장
 	s.updateDeviceState(ctx, device, "", "", deviceState)
-	s.updateReachableState(ctx, device, reachableState, ipv4)
+	s.updateReachableState(ctx, device, reachableState, ipv4, prevUA)
+
+	// 단말이 Reachable 상태인데 기존 Redis에 UserAgent가 없는 경우 (신규 등록 단말) 조회를 트리거
+	if reachableState == ReachableStateAvailable && prevUA == "" {
+		s.triggerDebouncedContactSync(ctx)
+	}
+}
+
+// triggerDebouncedContactSync 신규 등록 단말 발생 시 1초 Debounce 후 Contact 조회를 실행합니다.
+func (s *SyncService) triggerDebouncedContactSync(ctx context.Context) {
+	s.bufferMu.Lock()
+	defer s.bufferMu.Unlock()
+
+	if s.contactSyncTimer != nil {
+		s.contactSyncTimer.Stop()
+	}
+
+	s.contactSyncTimer = time.AfterFunc(1*time.Second, func() {
+		zap.S().Info("[SyncService] UserAgent가 없는 신규 단말 감지. Contact 목록(PJSIPShowContacts)을 조회합니다.")
+		s.bufferMu.Lock()
+		s.contactsRequested = false
+		s.bufferMu.Unlock()
+		s.requestContacts(ctx)
+	})
 }
 
 // handlerNewStateChange 장치의 통화 상태 변경(Newstate) 이벤트를 처리합니다.
@@ -360,13 +545,14 @@ func (s *SyncService) updateDeviceState(ctx context.Context, exten string,
 
 // updateReachableState Redis에 네트워크 상태를 저장합니다.
 func (s *SyncService) updateReachableState(ctx context.Context,
-	exten string, state ReachableState, ipaddr string) {
+	exten string, state ReachableState, ipaddr string, userAgent string) {
 
 	// [Redis HASH 설정]
 	key := fmt.Sprintf("asterisk:exten:%s:reachability", exten)
 	err := s.redis.HSet(ctx, key,
 		"state", string(state),
-		"ip_address", ipaddr).Err()
+		"ip_address", ipaddr,
+		"user_agent", userAgent).Err()
 
 	if err != nil {
 		zap.S().Errorf("[Redis] ReachableState 저장 실패 (Exten: %s, State: %s): %v", exten, state, err)
@@ -379,6 +565,7 @@ func (s *SyncService) updateReachableState(ctx context.Context,
 		Exten:     exten,
 		State:     string(state),
 		IPAddress: ipaddr,
+		UserAgent: userAgent,
 		Timestamp: time.Now().Local().Format(time.RFC3339),
 	}
 

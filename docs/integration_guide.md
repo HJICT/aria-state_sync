@@ -60,6 +60,8 @@
 | 필드명 | 데이터 타입 | 설명 | 예시 값 |
 | :--- | :--- | :--- | :--- |
 | `state` | String | 네트워크 가동 상태 (아래 상태 정의 참조) | `Reachable`, `Unreachable` |
+| `ip_address` | String | 단말의 IP 주소 | `192.168.1.50` |
+| `user_agent` | String | 단말의 SIP User-Agent 문자열 | `MicroSIP/3.21.3`, `Yealink SIP-T46S` |
 
 > **Redis CLI 조회 예시**:
 > ```bash
@@ -67,6 +69,10 @@
 > # 출력 결과:
 > # 1) "state"
 > # 2) "Reachable"
+> # 3) "ip_address"
+> # 4) "192.168.1.50"
+> # 5) "user_agent"
+> # 6) "MicroSIP/3.21.3"
 > ```
 
 ---
@@ -130,14 +136,18 @@
 | `event_type` | String | 이벤트 고유 타입 (항상 `ReachableState`) |
 | `exten` | String | 네트워크 상태가 변경된 대상 내선번호 |
 | `state` | String | 변경된 네트워크 상태값 (아래 상태 정의 참조) |
+| `ip_address` | String | 단말의 IP 주소 |
+| `user_agent` | String | 단말의 SIP User-Agent 문자열 |
 | `timestamp` | String | 이벤트 발생 시간 (RFC3339 포맷, KST 반영) |
 
-> **JSON 페이로드 예시 (네트워크 단절)**:
+> **JSON 페이로드 예시 (단말 연결 및 등록)**:
 > ```json
 > {
 >   "event_type": "ReachableState",
 >   "exten": "1001",
->   "state": "Unreachable",
+>   "state": "Reachable",
+>   "ip_address": "192.168.1.50",
+>   "user_agent": "MicroSIP/3.21.3",
 >   "timestamp": "2026-06-30T09:55:10+09:00"
 > }
 > ```

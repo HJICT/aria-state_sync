@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLoadConfig_ConsoleSetting(t *testing.T) {
@@ -130,5 +131,31 @@ logs:
 	_, err := LoadConfig("dev", tempDir)
 	if err == nil {
 		t.Fatalf("expected error due to missing REDIS_PASSWORD, but got nil")
+	}
+}
+
+func TestSyncConfig_GetInterval(t *testing.T) {
+	// 1. nil config
+	var sc *SyncConfig
+	if sc.GetInterval() != time.Hour {
+		t.Errorf("expected 1h for nil config, got %v", sc.GetInterval())
+	}
+
+	// 2. empty string
+	sc = &SyncConfig{Interval: ""}
+	if sc.GetInterval() != time.Hour {
+		t.Errorf("expected 1h for empty interval, got %v", sc.GetInterval())
+	}
+
+	// 3. invalid duration
+	sc = &SyncConfig{Interval: "invalid"}
+	if sc.GetInterval() != time.Hour {
+		t.Errorf("expected 1h for invalid interval, got %v", sc.GetInterval())
+	}
+
+	// 4. valid duration
+	sc = &SyncConfig{Interval: "30m"}
+	if sc.GetInterval() != 30*time.Minute {
+		t.Errorf("expected 30m, got %v", sc.GetInterval())
 	}
 }

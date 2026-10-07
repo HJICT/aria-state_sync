@@ -82,14 +82,14 @@ go build -o statesync-server cmd/server/main.go
     -   Fields: `state` (상태값), `connected_line` (상대방 번호)
 -   **네트워크 연결 상태**
     -   Key: `asterisk:exten:{extension}:reachability`
-    -   Fields: `state` (상태값)
+    -   Fields: `state` (상태값), `ip_address` (IP 주소), `user_agent` (단말 User-Agent)
 
 ### 2. Pub/Sub Channels (실시간 알림)
 
 -   **Channel**: `asterisk:device_state`
     -   Payload (JSON): `{"event_type": "DeviceState", "class": "Normal", "exten": "1001", "state": "Busy", "connected_line": "1002", "timestamp": "..."}`
 -   **Channel**: `asterisk:reachable_state`
-    -   Payload (JSON): `{"event_type": "ReachableState", "exten": "1001", "state": "Reachable", "timestamp": "..."}`
+    -   Payload (JSON): `{"event_type": "ReachableState", "exten": "1001", "state": "Reachable", "ip_address": "192.168.1.50", "user_agent": "MicroSIP/3.21.3", "timestamp": "..."}`
 
 ## 🚥 상태 정의 (State Definitions)
 

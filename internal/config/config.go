@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 	"gopkg.in/yaml.v3"
@@ -14,7 +15,25 @@ import (
 type Config struct {
 	Asterisk AsteriskConfig `yaml:"asterisk" mapstructure:"asterisk"` // Asterisk AMI 연결 설정
 	Redis    RedisConfig    `yaml:"redis" mapstructure:"redis"`       // Redis 데이터베이스 설정
+	Sync     SyncConfig     `yaml:"sync" mapstructure:"sync"`         // 상태 동기화 및 주기 설정
 	Logs     LogConfig      `yaml:"logs" mapstructure:"logs"`         // 로그 기록 설정
+}
+
+// SyncConfig 상태 동기화 주기 및 정책 설정입니다.
+type SyncConfig struct {
+	Interval string `yaml:"interval" mapstructure:"interval"` // 주기적 동기화 간격 (기본값: "1h")
+}
+
+// GetInterval 주기적 동기화 간격을 time.Duration으로 반환합니다. (기본값: 1시간)
+func (s *SyncConfig) GetInterval() time.Duration {
+	if s == nil || s.Interval == "" {
+		return time.Hour
+	}
+	d, err := time.ParseDuration(s.Interval)
+	if err != nil || d <= 0 {
+		return time.Hour
+	}
+	return d
 }
 
 // AsteriskConfig Asterisk Manager Interface(AMI) 연결을 위한 상세 설정입니다.
@@ -66,7 +85,14 @@ func LoadConfig(appEnv, configPath string) (*Config, error) {
 	}
 
 	// .env 파일 로드
-	envPath := filepath.Join(configPath, ".env")
+	envFile := ".env"
+	if appEnv != "" && appEnv != "prod" {
+		specificEnv := filepath.Join(configPath, fmt.Sprintf(".env.%s", appEnv))
+		if _, err := os.Stat(specificEnv); err == nil {
+			envFile = fmt.Sprintf(".env.%s", appEnv)
+		}
+	}
+	envPath := filepath.Join(configPath, envFile)
 	if err := godotenv.Load(envPath); err != nil {
 		return nil, fmt.Errorf(".env 파일을 찾을 수 없음: %w", err)
 	}

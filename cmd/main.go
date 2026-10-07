@@ -71,13 +71,14 @@ func main() {
 	zap.S().Infof("Asterisk 서버: %s:%d", cfg.Asterisk.Host, cfg.Asterisk.Port)
 	zap.S().Infof("Asterisk 계정: %s", cfg.Asterisk.User)
 	zap.S().Infof("Redis 서버:    %s:%d", cfg.Redis.Host, cfg.Redis.Port)
+	zap.S().Infof("동기화 주기:   %s", cfg.Sync.GetInterval())
 
 	// [Asterisk AMI 연결 설정]
 	amiClient := ami.New(ctx, zap.S(), cfg.Asterisk.Host, cfg.Asterisk.Port, cfg.Asterisk.User, cfg.Asterisk.Pass)
 
 	// [서비스 초기화 및 시작]
 	// Asterisk와 Redis를 연결하여 상태를 동기화하는 비즈니스 로직 서비스를 초기화합니다.
-	syncService := service.NewSyncService(amiClient, redisClient)
+	syncService := service.NewSyncService(amiClient, redisClient, cfg.Sync.GetInterval())
 	syncService.Start(ctx)
 
 	// 프로그램 종료 시 연결을 안전하게 닫습니다.
