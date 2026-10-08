@@ -14,6 +14,7 @@ import (
 	ami "common_lib/asterisk"
 	"common_lib/redis"
 
+	goredis "github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 )
 
@@ -68,6 +69,26 @@ type ReachableStateChangeEvent struct {
 	Timestamp string `json:"timestamp"`
 }
 
+// ContactItem 은 ContactList 이벤트 버퍼링을 위한 데이터 구조입니다.
+type ContactItem struct {
+	Endpoint  string
+	UserAgent string
+	IPAddress string
+}
+
+// updateContactScript 는 Redis에 대상 키가 존재하는 경우에만 UserAgent와 IPAddress를 업데이트하는 Lua 스크립트입니다.
+var updateContactScript = goredis.NewScript(`
+if redis.call('EXISTS', KEYS[1]) == 1 then
+    if ARGV[2] ~= '' then
+        redis.call('HSET', KEYS[1], 'user_agent', ARGV[1], 'ip_address', ARGV[2])
+    else
+        redis.call('HSET', KEYS[1], 'user_agent', ARGV[1])
+    end
+    return 1
+end
+return 0
+`)
+
 // EndpointData 는 Redis 업데이트 전 버퍼링을 위한 데이터 구조입니다.
 type EndpointData struct {
 	DeviceState    DeviceState
@@ -88,7 +109,11 @@ type SyncService struct {
 	expectedItems     int
 	contactsRequested bool
 
-	contactSyncTimer *time.Timer
+	contactSyncTimer   *time.Timer
+	contactMu          sync.Mutex
+	contactBuffer      map[string]ContactItem
+	contactBufferTimer *time.Timer
+	contactExpected    int
 }
 
 // NewSyncService 새로운 SyncService 인스턴스를 생성합니다.
@@ -101,6 +126,7 @@ func NewSyncService(ami *ami.AmiClient, redis *redis.RedisClient, syncInterval t
 		redis:          redis,
 		syncInterval:   syncInterval,
 		endpointBuffer: make(map[string]EndpointData),
+		contactBuffer:  make(map[string]ContactItem),
 	}
 }
 
@@ -265,7 +291,7 @@ func (s *SyncService) handlerEndpointListComplete(ctx context.Context, msg ami.M
 	}
 }
 
-// flushEndpointBuffer EndpointList에서 조회된 단말 기준으로 Redis를 업데이트하고, 삭제된 단말을 제거한 뒤 ContactList 조회를 요청합니다.
+// flushEndpointBuffer EndpointList에서 조회된 단말 기준으로 Redis를 Pipeline으로 일괄 업데이트하고, 삭제된 단말을 제거한 뒤 ContactList 조회를 요청합니다.
 func (s *SyncService) flushEndpointBuffer(ctx context.Context) {
 
 	s.bufferMu.Lock()
@@ -286,41 +312,123 @@ func (s *SyncService) flushEndpointBuffer(ctx context.Context) {
 		return
 	}
 
-	// 1. Asterisk에서 삭제된 단말 제거 (Redis 키 삭제)
+	// 1. Asterisk에서 삭제된 단말 제거 (SCAN 기반 안전한 키 정리)
 	s.cleanupDeletedEndpoints(ctx, buffer)
 
-	// 2. EndpointList에서 조회된 단말 기준으로 Redis 업데이트
-	zap.S().Infof("[SyncService] %d개의 단말 정보를 Redis에 업데이트합니다.", len(buffer))
+	// 2. EndpointList에서 조회된 단말 기준으로 Redis 일괄 업데이트 (Pipeline 배치 처리)
+	zap.S().Infof("[SyncService] %d개의 단말 정보를 Redis에 일괄(Pipeline) 업데이트합니다.", len(buffer))
 
-	for device, data := range buffer {
-		s.updateDeviceState(ctx, device, "", "", data.DeviceState)
+	devices := make([]string, 0, len(buffer))
+	for d := range buffer {
+		devices = append(devices, d)
+	}
 
-		// 기존 Redis에 저장되어 있는 UserAgent 유지 (ContactList 조회 전 정보 유실 방지)
-		ua := data.UserAgent
-		if ua == "" {
-			if prevUA, err := s.redis.HGet(ctx, fmt.Sprintf("asterisk:exten:%s:reachability", device), "user_agent").Result(); err == nil {
-				ua = prevUA
+	const batchSize = 500
+
+	// 2-1. 기존 Redis에 저장된 UserAgent를 Pipeline으로 일괄 조회 (유실 방지)
+	existingUAs := make(map[string]string, len(buffer))
+	for i := 0; i < len(devices); i += batchSize {
+		end := i + batchSize
+		if end > len(devices) {
+			end = len(devices)
+		}
+		chunk := devices[i:end]
+
+		pipe := s.redis.Pipeline()
+		cmds := make(map[string]*goredis.StringCmd, len(chunk))
+		for _, dev := range chunk {
+			reachKey := fmt.Sprintf("asterisk:exten:%s:reachability", dev)
+			cmds[dev] = pipe.HGet(ctx, reachKey, "user_agent")
+		}
+		_, _ = pipe.Exec(ctx) // 키 미존재(redis.Nil) 에러는 무시
+
+		for dev, cmd := range cmds {
+			if val, err := cmd.Result(); err == nil && val != "" {
+				existingUAs[dev] = val
 			}
 		}
-		s.updateReachableState(ctx, device, data.ReachableState, data.IPAddress, ua)
+	}
+
+	// 2-2. DeviceState 및 Reachability 상태를 Pipeline으로 일괄 저장 및 이벤트 발행
+	nowKST := time.Now().Local().Format(time.RFC3339)
+
+	for i := 0; i < len(devices); i += batchSize {
+		end := i + batchSize
+		if end > len(devices) {
+			end = len(devices)
+		}
+		chunk := devices[i:end]
+
+		pipe := s.redis.Pipeline()
+		for _, dev := range chunk {
+			data := buffer[dev]
+			ua := data.UserAgent
+			if ua == "" {
+				ua = existingUAs[dev]
+			}
+
+			callClass := "Normal"
+
+			// DeviceState HSet
+			devKey := fmt.Sprintf("asterisk:exten:%s:device_state", dev)
+			pipe.HSet(ctx, devKey,
+				"state", string(data.DeviceState),
+				"call_class", callClass,
+				"connected_line_num", "",
+				"connected_line_name", "")
+
+			// DeviceState Pub/Sub
+			devEvent := DeviceStateChangeEvent{
+				EventType:         "DeviceState",
+				CallClass:         callClass,
+				Exten:             dev,
+				State:             string(data.DeviceState),
+				ConnectedLineNum:  "",
+				ConnectedLineName: "",
+				Timestamp:         nowKST,
+			}
+			if devPayload, err := json.Marshal(devEvent); err == nil {
+				pipe.Publish(ctx, "asterisk:device_state", devPayload)
+			}
+
+			// Reachability HSet
+			reachKey := fmt.Sprintf("asterisk:exten:%s:reachability", dev)
+			pipe.HSet(ctx, reachKey,
+				"state", string(data.ReachableState),
+				"ip_address", data.IPAddress,
+				"user_agent", ua)
+
+			// Reachability Pub/Sub
+			reachEvent := ReachableStateChangeEvent{
+				EventType: "ReachableState",
+				Exten:     dev,
+				State:     string(data.ReachableState),
+				IPAddress: data.IPAddress,
+				UserAgent: ua,
+				Timestamp: nowKST,
+			}
+			if reachPayload, err := json.Marshal(reachEvent); err == nil {
+				pipe.Publish(ctx, "asterisk:reachable_state", reachPayload)
+			}
+		}
+
+		if _, err := pipe.Exec(ctx); err != nil {
+			zap.S().Errorf("[SyncService] 단말 상태 일괄 업데이트(Pipeline) 실패: %v", err)
+		}
 	}
 
 	// 3. 이후 ContactList로 UserAgent 값을 업데이트
 	s.requestContacts(ctx)
 }
 
-// cleanupDeletedEndpoints Asterisk에서 삭제된 단말을 감지하여 Redis에서 해당 키를 제거합니다.
+// cleanupDeletedEndpoints Asterisk에서 삭제된 단말을 SCAN 커서로 안전하게 감지하여 Redis에서 일괄 제거합니다.
 func (s *SyncService) cleanupDeletedEndpoints(ctx context.Context, currentEndpoints map[string]EndpointData) {
-	// Redis에 등록된 모든 asterisk:exten:* 키 조회
-	keys, err := s.redis.Keys(ctx, "asterisk:exten:*").Result()
-	if err != nil {
-		zap.S().Warnf("[SyncService] 삭제 단말 정리 중 Redis 키 조회 실패: %v", err)
-		return
-	}
-
 	deletedExtens := make(map[string]struct{})
-	for _, key := range keys {
-		// key 포맷: asterisk:exten:{exten}:device_state, asterisk:exten:{exten}:reachability
+
+	// KEYS 대신 SCAN 커서를 사용하여 Redis 블로킹(Stop-the-World) 방지
+	iter := s.redis.Scan(ctx, 0, "asterisk:exten:*", 500).Iterator()
+	for iter.Next(ctx) {
+		key := iter.Val()
 		parts := strings.Split(key, ":")
 		if len(parts) >= 3 && parts[0] == "asterisk" && parts[1] == "exten" {
 			exten := parts[2]
@@ -329,20 +437,39 @@ func (s *SyncService) cleanupDeletedEndpoints(ctx context.Context, currentEndpoi
 			}
 		}
 	}
+	if err := iter.Err(); err != nil {
+		zap.S().Warnf("[SyncService] 삭제 단말 정리 중 SCAN 실패: %v", err)
+		return
+	}
 
 	if len(deletedExtens) == 0 {
 		return
 	}
 
+	// 일괄 삭제할 키 목록 수집
+	keysToDelete := make([]string, 0, len(deletedExtens)*2)
 	for exten := range deletedExtens {
-		deviceKey := fmt.Sprintf("asterisk:exten:%s:device_state", exten)
-		reachKey := fmt.Sprintf("asterisk:exten:%s:reachability", exten)
-
-		s.redis.Del(ctx, deviceKey, reachKey)
-		zap.S().Infof("[SyncService] 삭제된 단말 정리 완료: exten=%s (Redis 키 제거)", exten)
+		keysToDelete = append(keysToDelete,
+			fmt.Sprintf("asterisk:exten:%s:device_state", exten),
+			fmt.Sprintf("asterisk:exten:%s:reachability", exten),
+		)
+		zap.S().Debugf("[SyncService] 삭제 대상 단말 검출: exten=%s", exten)
 	}
 
-	zap.S().Infof("[SyncService] 총 %d개의 삭제된 단말 키를 Redis에서 제거했습니다.", len(deletedExtens))
+	// 청크 단위(500개)로 분할하여 Del 일괄 삭제
+	const batchSize = 500
+	for i := 0; i < len(keysToDelete); i += batchSize {
+		end := i + batchSize
+		if end > len(keysToDelete) {
+			end = len(keysToDelete)
+		}
+		chunk := keysToDelete[i:end]
+		if err := s.redis.Del(ctx, chunk...).Err(); err != nil {
+			zap.S().Errorf("[SyncService] 삭제 단말 키 일괄 제거 실패: %v", err)
+		}
+	}
+
+	zap.S().Infof("[SyncService] 총 %d개의 삭제된 단말(%d개 키)을 Redis에서 안전하게 제거했습니다.", len(deletedExtens), len(keysToDelete))
 }
 
 // requestContacts Contact 및 UserAgent 조회를 위해 PJSIPShowContacts 액션을 전송합니다.
@@ -355,6 +482,16 @@ func (s *SyncService) requestContacts(ctx context.Context) {
 	s.contactsRequested = true
 	s.bufferMu.Unlock()
 
+	// Contact 버퍼 초기화
+	s.contactMu.Lock()
+	s.contactBuffer = make(map[string]ContactItem)
+	s.contactExpected = 0
+	if s.contactBufferTimer != nil {
+		s.contactBufferTimer.Stop()
+		s.contactBufferTimer = nil
+	}
+	s.contactMu.Unlock()
+
 	zap.S().Info("[SyncService] Contact 목록(PJSIPShowContacts) 조회를 요청하여 UserAgent를 업데이트합니다.")
 
 	_, err := s.ami.Action(ami.Message{
@@ -365,42 +502,116 @@ func (s *SyncService) requestContacts(ctx context.Context) {
 	}
 }
 
-// handlerContactList Contact 정보(UserAgent, IP 등) 이벤트를 수신하여 Redis의 UserAgent 값을 업데이트합니다.
+// handlerContactList Contact 정보 이벤트를 버퍼에 수집합니다.
 func (s *SyncService) handlerContactList(ctx context.Context, msg ami.Message) {
 	endpoint := msg["Endpoint"]
 	userAgent := msg["UserAgent"]
 	viaAddr := msg["ViaAddr"]
 	uri := msg["Uri"]
 
-	if endpoint == "" {
+	if endpoint == "" || userAgent == "" {
 		return
 	}
 
-	zap.S().Debugf("[ContactList] %s : UA(%s), Via(%s)", endpoint, userAgent, viaAddr)
+	ip := viaAddr
+	if ip == "" && uri != "" {
+		ip = extractSipIPv4(uri)
+	}
 
-	if userAgent != "" {
-		reachKey := fmt.Sprintf("asterisk:exten:%s:reachability", endpoint)
-		// Redis에 해당 단말 키가 존재하는 경우 UserAgent 업데이트
-		if s.redis.Exists(ctx, reachKey).Val() > 0 {
-			fields := []any{"user_agent", userAgent}
-			if viaAddr != "" {
-				fields = append(fields, "ip_address", viaAddr)
-			} else if uri != "" {
-				if ip := extractSipIPv4(uri); ip != "" {
-					fields = append(fields, "ip_address", ip)
-				}
-			}
-			if err := s.redis.HSet(ctx, reachKey, fields...).Err(); err != nil {
-				zap.S().Errorf("[Redis] ContactList UserAgent 갱신 실패 (exten: %s): %v", endpoint, err)
-			}
-		}
+	s.contactMu.Lock()
+	s.contactBuffer[endpoint] = ContactItem{
+		Endpoint:  endpoint,
+		UserAgent: userAgent,
+		IPAddress: ip,
+	}
+
+	var shouldFlush bool
+	if s.contactExpected > 0 && len(s.contactBuffer) >= s.contactExpected {
+		shouldFlush = true
+	} else if s.contactBufferTimer == nil {
+		// 첫 데이터 수신 시 5초 타임아웃 타이머 시작 (이벤트 누락 대비)
+		s.contactBufferTimer = time.AfterFunc(5*time.Second, func() {
+			zap.S().Warn("[SyncService] ContactList 수신 타임아웃(5초). 수신된 Contact 정보만 업데이트합니다.")
+			s.flushContactBuffer(ctx)
+		})
+	}
+	s.contactMu.Unlock()
+
+	if shouldFlush {
+		zap.S().Infof("[ContactList] 모든 Contact 정보 수신 완료. Redis 일괄 업데이트를 수행합니다.")
+		s.flushContactBuffer(ctx)
 	}
 }
 
 // handlerContactListComplete Contact 조회 완료 이벤트를 처리합니다.
 func (s *SyncService) handlerContactListComplete(ctx context.Context, msg ami.Message) {
-	listItems := msg["ListItems"]
-	zap.S().Infof("[ContactListComplete] Contact 목록 수신 완료 (등록된 Contact: %s개). UserAgent 업데이트 완료.", listItems)
+	listItemsStr := msg["ListItems"]
+	listItems, err := strconv.Atoi(listItemsStr)
+	if err != nil {
+		zap.S().Warnf("[ContactListComplete] ListItems 파싱 실패: %v. 즉시 업데이트합니다.", err)
+		s.flushContactBuffer(ctx)
+		return
+	}
+
+	s.contactMu.Lock()
+	s.contactExpected = listItems
+	shouldFlush := len(s.contactBuffer) >= s.contactExpected
+	currentCount := len(s.contactBuffer)
+	s.contactMu.Unlock()
+
+	if shouldFlush {
+		zap.S().Infof("[ContactListComplete] 모든 Contact(%d개) 수신 확인. Redis 업데이트를 시작합니다.", listItems)
+		s.flushContactBuffer(ctx)
+	} else {
+		zap.S().Infof("[ContactListComplete] Contact 수신 대기 (기대: %d, 현재: %d). 완료 시까지 기다립니다.", listItems, currentCount)
+	}
+}
+
+// flushContactBuffer 수집된 Contact 목록을 Pipeline으로 Redis에 일괄 업데이트합니다.
+func (s *SyncService) flushContactBuffer(ctx context.Context) {
+	s.contactMu.Lock()
+
+	buffer := s.contactBuffer
+	s.contactBuffer = make(map[string]ContactItem)
+	s.contactExpected = 0
+
+	if s.contactBufferTimer != nil {
+		s.contactBufferTimer.Stop()
+		s.contactBufferTimer = nil
+	}
+
+	s.contactMu.Unlock()
+
+	if len(buffer) == 0 {
+		return
+	}
+
+	zap.S().Infof("[ContactList] %d개의 Contact 정보를 Redis에 일괄(Pipeline) 업데이트합니다.", len(buffer))
+
+	contacts := make([]ContactItem, 0, len(buffer))
+	for _, item := range buffer {
+		contacts = append(contacts, item)
+	}
+
+	const batchSize = 500
+	for i := 0; i < len(contacts); i += batchSize {
+		end := i + batchSize
+		if end > len(contacts) {
+			end = len(contacts)
+		}
+		chunk := contacts[i:end]
+
+		pipe := s.redis.Pipeline()
+		for _, item := range chunk {
+			reachKey := fmt.Sprintf("asterisk:exten:%s:reachability", item.Endpoint)
+			updateContactScript.Run(ctx, pipe, []string{reachKey}, item.UserAgent, item.IPAddress)
+		}
+		if _, err := pipe.Exec(ctx); err != nil {
+			zap.S().Errorf("[Redis] ContactList 일괄 갱신(Pipeline) 실패: %v", err)
+		}
+	}
+
+	zap.S().Infof("[ContactList] %d개의 Contact UserAgent 업데이트를 완료했습니다.", len(contacts))
 }
 
 // handlerContactStateChange 장치 상태 변화(ContactStatus)의 이벤트를 처리합니다.
@@ -432,13 +643,68 @@ func (s *SyncService) handlerContactStateChange(ctx context.Context, msg ami.Mes
 
 	zap.S().Infof("[ContactState] %s : %s(%s, UA: %s)", device, state, ipv4, prevUA)
 
-	// Redis에 상태 저장
-	s.updateDeviceState(ctx, device, "", "", deviceState)
-	s.updateReachableState(ctx, device, reachableState, ipv4, prevUA)
+	// Redis 상태 저장 및 이벤트 발행을 Pipeline으로 일괄(1회 RTT) 처리
+	s.saveEndpointStateAndPublish(ctx, device, deviceState, reachableState, ipv4, prevUA)
 
 	// 단말이 Reachable 상태인데 기존 Redis에 UserAgent가 없는 경우 (신규 등록 단말) 조회를 트리거
 	if reachableState == ReachableStateAvailable && prevUA == "" {
 		s.triggerDebouncedContactSync(ctx)
+	}
+}
+
+// saveEndpointStateAndPublish 단말의 DeviceState와 ReachableState를 Pipeline으로 한 번에 저장 및 발행합니다.
+func (s *SyncService) saveEndpointStateAndPublish(ctx context.Context, exten string,
+	devState DeviceState, reachState ReachableState, ipaddr string, userAgent string) {
+
+	nowKST := time.Now().Local().Format(time.RFC3339)
+	callClass := "Normal"
+
+	pipe := s.redis.Pipeline()
+
+	// DeviceState HSet
+	devKey := fmt.Sprintf("asterisk:exten:%s:device_state", exten)
+	pipe.HSet(ctx, devKey,
+		"state", string(devState),
+		"call_class", callClass,
+		"connected_line_num", "",
+		"connected_line_name", "")
+
+	// DeviceState Pub/Sub
+	devEvent := DeviceStateChangeEvent{
+		EventType:         "DeviceState",
+		CallClass:         callClass,
+		Exten:             exten,
+		State:             string(devState),
+		ConnectedLineNum:  "",
+		ConnectedLineName: "",
+		Timestamp:         nowKST,
+	}
+	if devPayload, err := json.Marshal(devEvent); err == nil {
+		pipe.Publish(ctx, "asterisk:device_state", devPayload)
+	}
+
+	// Reachability HSet
+	reachKey := fmt.Sprintf("asterisk:exten:%s:reachability", exten)
+	pipe.HSet(ctx, reachKey,
+		"state", string(reachState),
+		"ip_address", ipaddr,
+		"user_agent", userAgent)
+
+	// Reachability Pub/Sub
+	reachEvent := ReachableStateChangeEvent{
+		EventType: "ReachableState",
+		Exten:     exten,
+		State:     string(reachState),
+		IPAddress: ipaddr,
+		UserAgent: userAgent,
+		Timestamp: nowKST,
+	}
+	if reachPayload, err := json.Marshal(reachEvent); err == nil {
+		pipe.Publish(ctx, "asterisk:reachable_state", reachPayload)
+	}
+
+	if _, err := pipe.Exec(ctx); err != nil {
+		zap.S().Errorf("[Redis] Endpoint 상태 일괄 저장(Pipeline) 실패 (exten: %s): %v", exten, err)
 	}
 }
 
