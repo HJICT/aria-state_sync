@@ -729,7 +729,7 @@ func (s *SyncService) triggerDebouncedContactSync(ctx context.Context) {
 // handlerNewStateChange 장치의 통화 상태 변경(Newstate) 이벤트를 처리합니다.
 func (s *SyncService) handlerNewStateChange(ctx context.Context, msg ami.Message) {
 
-	exten := msg["CallerIDNum"]
+	exten := extractExtenFromChannel(msg["Channel"])
 	stateStr := msg["ChannelState"]
 	connectedLineNum := msg["ConnectedLineNum"]
 	connectedLineName := msg["ConnectedLineName"]
@@ -753,14 +753,14 @@ func (s *SyncService) handlerNewStateChange(ctx context.Context, msg ami.Message
 	// 정수형 ChannelState를 표준 DeviceState로 변환
 	deviceState := parseChannelState(stateInt)
 
-	zap.S().Infof("[NewState] %s(%s) -> %s", exten, stateStr, deviceState)
+	zap.S().Infof("[NewState] %s(%s) -> %s", exten, deviceState, connectedLineNum)
 	s.updateDeviceState(ctx, exten, connectedLineNum, connectedLineName, deviceState)
 }
 
 // handlerHangup 통화 종료(Hangup) 이벤트를 처리합니다.
 func (s *SyncService) handlerHangup(ctx context.Context, msg ami.Message) {
 
-	exten := msg["CallerIDNum"]
+	exten := extractExtenFromChannel(msg["Channel"])
 	deviceState := msg["ChannelStateDesc"]
 	if exten == "" || strings.Contains(exten, "unknown") {
 		zap.S().Warnf("[Hangup] 내선번호를 추출할 수 없습니다. (Channel: %s)", msg["Channel"])
@@ -913,6 +913,19 @@ func extractSipIPv4(s string) string {
 	matches := re.FindStringSubmatch(s)
 
 	if len(matches) <= 0 {
+		return ""
+	}
+
+	return matches[1]
+}
+
+// extractExtenFromChannel 채널 정보(예: PJSIP/3000-000000e6)에서 내선번호를 추출합니다.
+func extractExtenFromChannel(channel string) string {
+	// `TECH/EXTEN-ID` 형식에서 내선번호(EXTEN) 추출
+	re := regexp.MustCompile(`^[A-Za-z0-9_]+/([^-@]+)`)
+	matches := re.FindStringSubmatch(channel)
+
+	if len(matches) <= 1 {
 		return ""
 	}
 
