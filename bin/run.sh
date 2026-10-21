@@ -15,9 +15,19 @@ else
 fi
 
 APP_NAME="state-sync"
-BIN_FILE="$PROJECT_ROOT/$APP_NAME"
-PID_DIR="$PROJECT_ROOT/run"
-PID_FILE="$PID_DIR/$APP_NAME.pid"
+if [ -f "$PROJECT_ROOT/bin/$APP_NAME" ]; then
+    BIN_FILE="$PROJECT_ROOT/bin/$APP_NAME"
+elif [ -f "$PROJECT_ROOT/$APP_NAME" ]; then
+    BIN_FILE="$PROJECT_ROOT/$APP_NAME"
+else
+    BIN_FILE="$PROJECT_ROOT/bin/$APP_NAME"
+fi
+
+DEFAULT_PID_FILE="/run/aria_state_sync.pid"
+FALLBACK_PID_FILE="$PROJECT_ROOT/run/aria_state_sync.pid"
+PID_FILE=""
+TARGET_PID_FILE=""
+
 LOG_DIR="$PROJECT_ROOT/logs"
 LOG_FILE="$LOG_DIR/nohup.log"
 
@@ -105,7 +115,68 @@ if [ -z "$APP_ENV" ]; then
     APP_ENV="$DEFAULT_ENV"
 fi
 
+resolve_pid_file() {
+    local cfg_dir="$CONFIG_PATH"
+    if [ -z "$cfg_dir" ]; then
+        if [ -d "$PROJECT_ROOT/configs" ]; then
+            cfg_dir="$PROJECT_ROOT/configs"
+        elif [ -d "$PROJECT_ROOT/config" ]; then
+            cfg_dir="$PROJECT_ROOT/config"
+        else
+            cfg_dir="$PROJECT_ROOT"
+        fi
+    fi
+
+    local target_cfg=""
+    if [ -f "$cfg_dir" ]; then
+        target_cfg="$cfg_dir"
+    elif [ -d "$cfg_dir" ]; then
+        local env_file="config.yaml"
+        if [ "$APP_ENV" != "prod" ] && [ -n "$APP_ENV" ]; then
+            env_file="config.$APP_ENV.yaml"
+        fi
+        if [ -f "$cfg_dir/$env_file" ]; then
+            target_cfg="$cfg_dir/$env_file"
+        elif [ -f "$cfg_dir/config.yaml" ]; then
+            target_cfg="$cfg_dir/config.yaml"
+        elif [ -f "$cfg_dir/config.example.yaml" ]; then
+            target_cfg="$cfg_dir/config.example.yaml"
+        fi
+    fi
+
+    local parsed_pid=""
+    if [ -n "$target_cfg" ] && [ -f "$target_cfg" ]; then
+        # 주석(#)이 아닌 줄에서 pid_file (또는 pidFile) 설정값 추출
+        parsed_pid="$(grep -E '^[[:space:]]*(pid_file|pidFile):' "$target_cfg" 2>/dev/null | grep -v '^[[:space:]]*#' | head -n1 | sed -E 's/^[[:space:]]*(pid_file|pidFile):[[:space:]]*["'\'']?([^"'\'']+)["'\'']?.*$/\2/' | tr -d '\r' | xargs)"
+    fi
+
+    if [ -n "$parsed_pid" ]; then
+        TARGET_PID_FILE="$parsed_pid"
+    else
+        TARGET_PID_FILE="$DEFAULT_PID_FILE"
+    fi
+
+    # 이미 존재하는 PID 파일 확인
+    if [ -f "$TARGET_PID_FILE" ]; then
+        PID_FILE="$TARGET_PID_FILE"
+    elif [ -f "$FALLBACK_PID_FILE" ]; then
+        PID_FILE="$FALLBACK_PID_FILE"
+    else
+        # 접근 권한 확인: TARGET_PID_FILE의 부모 디렉토리에 쓰기 권한이 있는지 확인
+        local target_dir
+        target_dir="$(dirname "$TARGET_PID_FILE")"
+        if [ -d "$target_dir" ] && [ -w "$target_dir" ]; then
+            PID_FILE="$TARGET_PID_FILE"
+        else
+            PID_FILE="$FALLBACK_PID_FILE"
+        fi
+    fi
+}
+
+resolve_pid_file
+
 get_pid() {
+    resolve_pid_file
     if [ -f "$PID_FILE" ]; then
         cat "$PID_FILE" 2>/dev/null || echo ""
     fi
@@ -121,6 +192,7 @@ is_running() {
 }
 
 start_app() {
+    resolve_pid_file
     local pid
     pid="$(get_pid)"
 
@@ -140,7 +212,7 @@ start_app() {
         exit 1
     fi
 
-    mkdir -p "$PID_DIR"
+    mkdir -p "$(dirname "$FALLBACK_PID_FILE")"
     mkdir -p "$LOG_DIR"
 
     local args=("--env" "$APP_ENV")
@@ -154,25 +226,43 @@ start_app() {
         echo "    Config Path: $CONFIG_PATH"
     fi
     echo "    Log File:    $LOG_FILE"
-    echo "    PID File:    $PID_FILE"
+    echo "    Target PID:  $TARGET_PID_FILE"
 
     nohup "$BIN_FILE" "${args[@]}" >> "$LOG_FILE" 2>&1 &
     local new_pid=$!
-    echo "$new_pid" > "$PID_FILE"
+
+    # Wait for PID file to be written by application (up to 3 seconds)
+    local waited=0
+    while [ $waited -lt 30 ]; do
+        if [ -f "$TARGET_PID_FILE" ]; then
+            PID_FILE="$TARGET_PID_FILE"
+            break
+        elif [ -f "$FALLBACK_PID_FILE" ]; then
+            PID_FILE="$FALLBACK_PID_FILE"
+            break
+        fi
+        if ! is_running "$new_pid"; then
+            break
+        fi
+        sleep 0.1
+        waited=$((waited + 1))
+    done
 
     # Verify if process is still running after a short delay
-    sleep 1
     if is_running "$new_pid"; then
-        echo "[+] $APP_NAME started successfully (PID: $new_pid)."
+        echo "[+] $APP_NAME started successfully (PID: $new_pid, PID File: $PID_FILE)."
     else
         echo "[-] Failed to start $APP_NAME (process terminated immediately)." >&2
         echo "[-] Check log file for details: $LOG_FILE" >&2
-        rm -f "$PID_FILE"
+        if [ -n "$PID_FILE" ] && [ -f "$PID_FILE" ]; then
+            rm -f "$PID_FILE"
+        fi
         exit 1
     fi
 }
 
 stop_app() {
+    resolve_pid_file
     local pid
     pid="$(get_pid)"
 
@@ -204,11 +294,14 @@ stop_app() {
         fi
     done
 
-    rm -f "$PID_FILE"
+    if [ -f "$PID_FILE" ]; then
+        rm -f "$PID_FILE"
+    fi
     echo "[+] $APP_NAME has been stopped."
 }
 
 status_app() {
+    resolve_pid_file
     local pid
     pid="$(get_pid)"
 
@@ -218,13 +311,13 @@ status_app() {
     fi
 
     if is_running "$pid"; then
-        echo "[+] $APP_NAME is running (PID: $pid)."
+        echo "[+] $APP_NAME is running (PID: $pid, PID File: $PID_FILE)."
         if command -v ps >/dev/null 2>&1; then
             ps -p "$pid" -o pid,user,%cpu,%mem,etime,args 2>/dev/null || true
         fi
         return 0
     else
-        echo "[!] $APP_NAME is not running, but stale PID file exists (PID: $pid)."
+        echo "[!] $APP_NAME is not running, but stale PID file exists (PID: $pid, File: $PID_FILE)."
         return 1
     fi
 }

@@ -11,6 +11,7 @@ import (
 	"common_lib/logger"
 	"common_lib/redis"
 	"statesync/internal/config"
+	"statesync/internal/pidfile"
 	"statesync/internal/service"
 	"statesync/internal/version"
 
@@ -40,10 +41,12 @@ func main() {
 
 	// [로거 초기화]
 	// 설정 로드 직후 최우선으로 로거를 초기화합니다.
+	// 실행 환경(systemd 여부) 및 쓰기 권한을 확인하여 로그 저장 경로를 결정합니다.
+	logPath := config.ResolveLogPath(cfg.Logs.Path)
 	logCfg := &logger.LogConfig{
 		Level:      cfg.Logs.Level,
 		Console:    cfg.Logs.Console,
-		Path:       cfg.Logs.Path,
+		Path:       logPath,
 		Rotation:   cfg.Logs.Rotation,
 		MaxSize:    cfg.Logs.MaxSize,
 		MaxBackups: cfg.Logs.MaxBackups,
@@ -56,6 +59,23 @@ func main() {
 	defer logger.Sync()
 
 	zap.S().Infof("=== %s ===", version.Info())
+	zap.S().Infof("로그 저장 디렉토리: %s (systemd: %v)", logPath, config.IsSystemd())
+
+	// [PID 파일 저장]
+	// 설정 파일의 pidFile 위치를 참조하며, 미지정 시 기본값은 /run/aria_state_sync.pid 입니다.
+	// 해당 경로에 쓰기 권한이 없는 경우 ./run/aria_state_sync.pid 에 저장합니다.
+	pidPath, err := pidfile.WritePID(cfg.PidFile)
+	if err != nil {
+		zap.S().Fatalf("PID 파일 생성 실패: %v", err)
+	}
+	zap.S().Infof("PID 파일 생성 완료: %s (PID: %d)", pidPath, os.Getpid())
+	defer func() {
+		if err := pidfile.RemovePID(pidPath); err != nil {
+			zap.S().Warnf("PID 파일 삭제 실패: %v", err)
+		} else {
+			zap.S().Infof("PID 파일 삭제 완료: %s", pidPath)
+		}
+	}()
 
 	// [Redis 초기화]
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

@@ -17,6 +17,25 @@ type Config struct {
 	Redis    RedisConfig    `yaml:"redis" mapstructure:"redis"`       // Redis 데이터베이스 설정
 	Sync     SyncConfig     `yaml:"sync" mapstructure:"sync"`         // 상태 동기화 및 주기 설정
 	Logs     LogConfig      `yaml:"logs" mapstructure:"logs"`         // 로그 기록 설정
+	PidFile  string         `yaml:"pid_file" mapstructure:"pid_file"` // PID 파일 저장 경로
+}
+
+// UnmarshalYAML yaml.v3 언마샬링 시 pid_file과 레거시 pidFile 설정을 모두 지원합니다.
+func (c *Config) UnmarshalYAML(node *yaml.Node) error {
+	type rawConfig Config
+	type alias struct {
+		rawConfig     `yaml:",inline"`
+		LegacyPidFile string `yaml:"pidFile"`
+	}
+	var a alias
+	if err := node.Decode(&a); err != nil {
+		return err
+	}
+	*c = Config(a.rawConfig)
+	if c.PidFile == "" && a.LegacyPidFile != "" {
+		c.PidFile = a.LegacyPidFile
+	}
+	return nil
 }
 
 // SyncConfig 상태 동기화 주기 및 정책 설정입니다.
@@ -63,6 +82,62 @@ type LogConfig struct {
 	Compress   bool   `yaml:"compress" mapstructure:"compress"`       // 로그 파일 압축 여부
 }
 
+const (
+	// DefaultSystemdLogPath systemd 서비스 구동 시 미지정 기본 로그 경로
+	DefaultSystemdLogPath = "/var/log/aria-state-sync"
+	// DefaultWorkingLogPath 일반 구동 시 미지정 또는 권한 부족 시 fallback 로그 경로
+	DefaultWorkingLogPath = "./log"
+)
+
+// IsSystemd 현재 프로세스가 systemd 서비스 환경에서 실행되었는지 확인합니다.
+// systemd는 서비스 실행 시 INVOCATION_ID 환경 변수를 고유하게 주입합니다.
+func IsSystemd() bool {
+	return os.Getenv("INVOCATION_ID") != ""
+}
+
+// ResolveLogPath 로그 저장 디렉토리 경로를 환경과 권한에 따라 결정합니다.
+// 1. 경로가 명시적으로 지정된 경우:
+//    - 쓰기 권한이 있으면 해당 경로 사용
+//    - 쓰기 권한이 없으면 Working Directory 하위 log/ ("./log") 사용
+// 2. 경로가 미지정된 경우:
+//    - systemd 환경인 경우: "/var/log/aria-state-sync" 사용 (권한 부족 시 "./log")
+//    - 그렇지 않은 경우: Working Directory 하위 log/ ("./log") 사용
+func ResolveLogPath(configuredPath string) string {
+	trimmed := strings.TrimSpace(configuredPath)
+
+	// 1. 경로가 명시적으로 지정된 경우
+	if trimmed != "" {
+		if canWrite(trimmed) {
+			return trimmed
+		}
+		return DefaultWorkingLogPath
+	}
+
+	// 2. 경로가 미지정된 경우
+	if IsSystemd() {
+		if canWrite(DefaultSystemdLogPath) {
+			return DefaultSystemdLogPath
+		}
+		return DefaultWorkingLogPath
+	}
+
+	return DefaultWorkingLogPath
+}
+
+func canWrite(dir string) bool {
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return false
+	}
+	testFile := filepath.Join(dir, fmt.Sprintf(".perm_test_%d_%d", os.Getpid(), time.Now().UnixNano()))
+	f, err := os.OpenFile(testFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return false
+	}
+	_ = f.Close()
+	_ = os.Remove(testFile)
+	return true
+}
+
 // LoadConfig 지정된 경로에서 설정 파일을 읽어오고 환경 변수를 적용하여 반환합니다.
 // 1. .env 환경 파일 로드 (godotenv)
 // 2. config.{env}.yaml 파일 읽기
@@ -85,16 +160,21 @@ func LoadConfig(appEnv, configPath string) (*Config, error) {
 	}
 
 	// .env 파일 로드
+	baseDir := configPath
+	if strings.HasSuffix(lowerPath, ".yaml") || strings.HasSuffix(lowerPath, ".yml") {
+		baseDir = filepath.Dir(configPath)
+	}
+
 	envFile := ".env"
 	if appEnv != "" && appEnv != "prod" {
-		specificEnv := filepath.Join(configPath, fmt.Sprintf(".env.%s", appEnv))
+		specificEnv := filepath.Join(baseDir, fmt.Sprintf(".env.%s", appEnv))
 		if _, err := os.Stat(specificEnv); err == nil {
 			envFile = fmt.Sprintf(".env.%s", appEnv)
 		}
 	}
-	envPath := filepath.Join(configPath, envFile)
+	envPath := filepath.Join(baseDir, envFile)
 	if err := godotenv.Load(envPath); err != nil {
-		return nil, fmt.Errorf(".env 파일을 찾을 수 없음: %w", err)
+		// .env 파일이 없는 것은 환경 변수(systemd EnvironmentFile 등)로 직접 제공될 수 있으므로 허용
 	}
 
 	// yaml 파일 로드

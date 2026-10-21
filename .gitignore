@@ -29,6 +29,7 @@ vendor/
 *.sw?
 
 # Logs
+log/
 logs/*
 cmd/server/logs/*
 !logs/.gitkeep
