@@ -41,17 +41,19 @@ func main() {
 
 	// [로거 초기화]
 	// 설정 로드 직후 최우선으로 로거를 초기화합니다.
-	// 실행 환경(systemd 여부) 및 쓰기 권한을 확인하여 로그 저장 경로를 결정합니다.
-	logPath := config.ResolveLogPath(cfg.Logs.Path)
+	// 경로만 지정된 경우 기본 파일명(state_sync.log), 파일명까지 지정된 경우 지정된 파일명을 적용합니다.
+	// 지정되지 않았거나 권한이 없는 경우 Working directory 하위 log에 저장합니다.
+	logDir, logFile := config.ResolveLogPathAndFile(cfg.Log.Path)
 	logCfg := &logger.LogConfig{
-		Level:      cfg.Logs.Level,
-		Console:    cfg.Logs.Console,
-		Path:       logPath,
-		Rotation:   cfg.Logs.Rotation,
-		MaxSize:    cfg.Logs.MaxSize,
-		MaxBackups: cfg.Logs.MaxBackups,
-		MaxAge:     cfg.Logs.MaxAge,
-		Compress:   cfg.Logs.Compress,
+		Level:      cfg.Log.Level,
+		Console:    cfg.Log.Console,
+		Path:       logDir,
+		Filename:   logFile,
+		Rotation:   cfg.Log.Rotation,
+		MaxSize:    cfg.Log.MaxSize,
+		MaxBackups: cfg.Log.MaxBackups,
+		MaxAge:     cfg.Log.MaxAge,
+		Compress:   cfg.Log.Compress,
 	}
 	if err := logger.Init(*appEnv, logCfg); err != nil {
 		panic(err)
@@ -59,7 +61,7 @@ func main() {
 	defer logger.Sync()
 
 	zap.S().Infof("=== %s ===", version.Info())
-	zap.S().Infof("로그 저장 디렉토리: %s (systemd: %v)", logPath, config.IsSystemd())
+	zap.S().Infof("로그 저장 파일: %s/%s", logDir, logFile)
 
 	// [PID 파일 저장]
 	// 설정 파일의 pidFile 위치를 참조하며, 미지정 시 기본값은 /run/aria_state_sync.pid 입니다.

@@ -1,6 +1,6 @@
 # Project configuration
 BUILD_DIR=bin
-BINARY_NAME=state-sync
+BINARY_NAME=state_sync
 MAIN_FILE=./cmd/main.go
 
 # Version configuration (injected via -ldflags)

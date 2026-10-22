@@ -26,7 +26,7 @@ redis:
   host: "localhost"
   port: 6379
   pass: "${REDIS_PASSWORD}"
-logs:
+log:
   level: "info"
   console: true
   path: "./logs"
@@ -39,8 +39,8 @@ logs:
 	if err != nil {
 		t.Fatalf("LoadConfig failed: %v", err)
 	}
-	if cfg.Logs.Console == nil || !*cfg.Logs.Console {
-		t.Errorf("expected Logs.Console to be true, got %v", cfg.Logs.Console)
+	if cfg.Log.Console == nil || !*cfg.Log.Console {
+		t.Errorf("expected Log.Console to be true, got %v", cfg.Log.Console)
 	}
 
 	// 2. console: false
@@ -54,7 +54,7 @@ redis:
   host: "localhost"
   port: 6379
   pass: "${REDIS_PASSWORD}"
-logs:
+log:
   level: "info"
   console: false
   path: "./logs"
@@ -67,8 +67,8 @@ logs:
 	if err != nil {
 		t.Fatalf("LoadConfig failed: %v", err)
 	}
-	if cfg.Logs.Console == nil || *cfg.Logs.Console {
-		t.Errorf("expected Logs.Console to be false, got %v", cfg.Logs.Console)
+	if cfg.Log.Console == nil || *cfg.Log.Console {
+		t.Errorf("expected Log.Console to be false, got %v", cfg.Log.Console)
 	}
 
 	// 3. console omitted (nil)
@@ -82,7 +82,7 @@ redis:
   host: "localhost"
   port: 6379
   pass: "${REDIS_PASSWORD}"
-logs:
+log:
   level: "info"
   path: "./logs"
 `
@@ -94,8 +94,8 @@ logs:
 	if err != nil {
 		t.Fatalf("LoadConfig failed: %v", err)
 	}
-	if cfg.Logs.Console != nil {
-		t.Errorf("expected Logs.Console to be nil when omitted, got %v", *cfg.Logs.Console)
+	if cfg.Log.Console != nil {
+		t.Errorf("expected Log.Console to be nil when omitted, got %v", *cfg.Log.Console)
 	}
 }
 
@@ -121,7 +121,7 @@ redis:
   host: "localhost"
   port: 6379
   pass: "${REDIS_PASSWORD}"
-logs:
+log:
   level: "info"
 `
 	if err := os.WriteFile(filepath.Join(tempDir, "config.dev.yaml"), []byte(yaml), 0644); err != nil {
@@ -179,7 +179,7 @@ redis:
   host: "localhost"
   port: 6379
   pass: "${REDIS_PASSWORD}"
-logs:
+log:
   level: "info"
 pid_file: "/custom/path/app.pid"
 `
@@ -206,7 +206,7 @@ redis:
   host: "localhost"
   port: 6379
   pass: "${REDIS_PASSWORD}"
-logs:
+log:
   level: "info"
 pidFile: "/legacy/path/app.pid"
 `
@@ -233,7 +233,7 @@ redis:
   host: "localhost"
   port: 6379
   pass: "${REDIS_PASSWORD}"
-logs:
+log:
   level: "info"
 `
 	if err := os.WriteFile(filepath.Join(tempDir, "config.dev.yaml"), []byte(yamlWithoutPid), 0644); err != nil {
@@ -268,29 +268,81 @@ func TestResolveLogPath(t *testing.T) {
 
 	restrictedPath := filepath.Join(noWriteDir, "sub", "test.log")
 	resolved = ResolveLogPath(restrictedPath)
-	if resolved != DefaultWorkingLogPath {
-		t.Errorf("expected fallback to %s on permission error, got %s", DefaultWorkingLogPath, resolved)
+	if resolved != DefaultLogPath {
+		t.Errorf("expected fallback to %s on permission error, got %s", DefaultLogPath, resolved)
 	}
 
-	// 3. 미지정 + 비 systemd 환경
-	t.Setenv("INVOCATION_ID", "")
+	// 3. 미지정 (빈 문자열)
 	resolved = ResolveLogPath("")
-	if resolved != DefaultWorkingLogPath {
-		t.Errorf("expected default working log path %s, got %s", DefaultWorkingLogPath, resolved)
+	if resolved != DefaultLogPath {
+		t.Errorf("expected default log path %s, got %s", DefaultLogPath, resolved)
 	}
 
-	// 4. 미지정 + systemd 환경 (INVOCATION_ID 존재)
-	t.Setenv("INVOCATION_ID", "mock-systemd-invocation-id")
-	resolved = ResolveLogPath("")
-	if os.Geteuid() != 0 {
-		// 일반 사용자 환경에서는 /var/log/aria-state-sync 권한이 없으므로 ./log 로 fallback 되어야 함
-		if resolved != DefaultWorkingLogPath {
-			t.Errorf("expected fallback %s for non-root in systemd, got %s", DefaultWorkingLogPath, resolved)
-		}
-	} else {
-		// root 환경에서는 /var/log/aria-state-sync 사용
-		if resolved != DefaultSystemdLogPath {
-			t.Errorf("expected %s for root in systemd, got %s", DefaultSystemdLogPath, resolved)
-		}
+	// 4. 공백만 지정된 경우
+	resolved = ResolveLogPath("   ")
+	if resolved != DefaultLogPath {
+		t.Errorf("expected default log path %s for whitespace, got %s", DefaultLogPath, resolved)
+	}
+}
+
+func TestResolveLogPathAndFile(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// 1. 경로만 지정된 경우 -> 파일명은 기본값 "state_sync.log"
+	dirOnly := filepath.Join(tempDir, "only_dir")
+	dir, file := ResolveLogPathAndFile(dirOnly)
+	if dir != dirOnly {
+		t.Errorf("expected dir %s, got %s", dirOnly, dir)
+	}
+	if file != DefaultLogFilename {
+		t.Errorf("expected file %s, got %s", DefaultLogFilename, file)
+	}
+
+	// 2. 경로만 지정 (끝에 슬래시 포함)
+	dirWithSlash := filepath.Join(tempDir, "slash_dir") + "/"
+	dir, file = ResolveLogPathAndFile(dirWithSlash)
+	if dir != dirWithSlash {
+		t.Errorf("expected dir %s, got %s", dirWithSlash, dir)
+	}
+	if file != DefaultLogFilename {
+		t.Errorf("expected file %s, got %s", DefaultLogFilename, file)
+	}
+
+	// 3. 파일명까지 정의된 경우 -> 해당 파일명 및 상위 디렉토리 사용
+	customLogPath := filepath.Join(tempDir, "service_dir", "my_app.log")
+	dir, file = ResolveLogPathAndFile(customLogPath)
+	expectedDir := filepath.Dir(customLogPath)
+	if dir != expectedDir {
+		t.Errorf("expected dir %s, got %s", expectedDir, dir)
+	}
+	if file != "my_app.log" {
+		t.Errorf("expected file 'my_app.log', got %s", file)
+	}
+
+	// 4. 파일명까지 정의되었으나 해당 위치에 권한이 없는 경우 -> fallback 디렉토리("./log") + 지정된 파일명 유지
+	noWriteDir := filepath.Join(tempDir, "nowrite")
+	if err := os.Mkdir(noWriteDir, 0555); err != nil {
+		t.Fatalf("failed to create read-only dir: %v", err)
+	}
+	defer os.Chmod(noWriteDir, 0755)
+
+	restrictedWithFile := filepath.Join(noWriteDir, "sub", "app.log")
+	dir, file = ResolveLogPathAndFile(restrictedWithFile)
+	if dir != DefaultLogPath {
+		t.Errorf("expected fallback dir %s, got %s", DefaultLogPath, dir)
+	}
+	if file != "app.log" {
+		t.Errorf("expected file 'app.log', got %s", file)
+	}
+
+	// 5. 미지정 (빈 문자열 / 공백)
+	dir, file = ResolveLogPathAndFile("")
+	if dir != DefaultLogPath || file != DefaultLogFilename {
+		t.Errorf("expected %s/%s for empty, got %s/%s", DefaultLogPath, DefaultLogFilename, dir, file)
+	}
+
+	dir, file = ResolveLogPathAndFile("   ")
+	if dir != DefaultLogPath || file != DefaultLogFilename {
+		t.Errorf("expected %s/%s for whitespace, got %s/%s", DefaultLogPath, DefaultLogFilename, dir, file)
 	}
 }

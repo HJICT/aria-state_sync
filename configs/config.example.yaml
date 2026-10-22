@@ -24,11 +24,11 @@ sync:
 #───────────────────────────────────────────────
 # ── Logs
 # ──────────────────────────────────────────────
-logs:
+log:
   level: "info"       # debug | info | warn | error
   console: false      # 콘솔(Stdout) 출력 여부 (true | false, 기본값: true)
-  # path: "./log"     # 미지정 시: systemd 환경은 /var/log/aria-state-sync/, 일반 실행은 ./log/
-                      # 지정 시: 해당 경로 저장 (쓰기 권한이 없을 경우 ./log/ 에 저장)
+  # path: "./log"     # 경로만 지정 시 state_sync.log 로 저장, 파일명까지 지정 시(예: ./log/app.log) 지정 파일명으로 저장
+                      # 미지정 또는 권한 부족 시 Working directory 하위 log 에 저장
   rotation: "daily"   # daily | size
   max_size: 100       # [size 전용] 롤링 기준 파일 크기 (MB)
   max_backups: 10     # [size 전용] 보관할 롤링 파일 최대 개수

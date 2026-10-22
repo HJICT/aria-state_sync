@@ -16,24 +16,38 @@ type Config struct {
 	Asterisk AsteriskConfig `yaml:"asterisk" mapstructure:"asterisk"` // Asterisk AMI 연결 설정
 	Redis    RedisConfig    `yaml:"redis" mapstructure:"redis"`       // Redis 데이터베이스 설정
 	Sync     SyncConfig     `yaml:"sync" mapstructure:"sync"`         // 상태 동기화 및 주기 설정
-	Logs     LogConfig      `yaml:"logs" mapstructure:"logs"`         // 로그 기록 설정
+	Log      LogConfig      `yaml:"logs" mapstructure:"log"`          // 로그 기록 설정
 	PidFile  string         `yaml:"pid_file" mapstructure:"pid_file"` // PID 파일 저장 경로
 }
 
-// UnmarshalYAML yaml.v3 언마샬링 시 pid_file과 레거시 pidFile 설정을 모두 지원합니다.
+// UnmarshalYAML yaml.v3 언마샬링 시 pid_file/pidFile 및 log/logs 설정을 모두 유연하게 지원합니다.
 func (c *Config) UnmarshalYAML(node *yaml.Node) error {
 	type rawConfig Config
-	type alias struct {
-		rawConfig     `yaml:",inline"`
-		LegacyPidFile string `yaml:"pidFile"`
-	}
-	var a alias
-	if err := node.Decode(&a); err != nil {
+	var raw rawConfig
+	if err := node.Decode(&raw); err != nil {
 		return err
 	}
-	*c = Config(a.rawConfig)
-	if c.PidFile == "" && a.LegacyPidFile != "" {
-		c.PidFile = a.LegacyPidFile
+	*c = Config(raw)
+
+	// 하위 호환성 보정
+	var fallback struct {
+		LegacyPidFile string    `yaml:"pidFile"`
+		AltLog        LogConfig `yaml:"log"`
+	}
+	if err := node.Decode(&fallback); err == nil {
+		if c.PidFile == "" && fallback.LegacyPidFile != "" {
+			c.PidFile = fallback.LegacyPidFile
+		}
+		// logs 키가 없고 log 키로 작성된 경우 보정
+		if c.Log.Level == "" && fallback.AltLog.Level != "" {
+			c.Log = fallback.AltLog
+		}
+		if c.Log.Console == nil && fallback.AltLog.Console != nil {
+			c.Log.Console = fallback.AltLog.Console
+		}
+		if c.Log.Path == "" && fallback.AltLog.Path != "" {
+			c.Log.Path = fallback.AltLog.Path
+		}
 	}
 	return nil
 }
@@ -83,45 +97,48 @@ type LogConfig struct {
 }
 
 const (
-	// DefaultSystemdLogPath systemd 서비스 구동 시 미지정 기본 로그 경로
-	DefaultSystemdLogPath = "/var/log/aria-state-sync"
-	// DefaultWorkingLogPath 일반 구동 시 미지정 또는 권한 부족 시 fallback 로그 경로
-	DefaultWorkingLogPath = "./log"
+	// DefaultLogPath 미지정 시 또는 권한 부족 시 기본 로그 저장 경로 (Working directory 하위 log)
+	DefaultLogPath = "./log"
+	// DefaultLogFilename 로그 경로만 지정되거나 파일명이 미지정된 경우 기본 로그 파일명
+	DefaultLogFilename = "state_sync.log"
 )
 
-// IsSystemd 현재 프로세스가 systemd 서비스 환경에서 실행되었는지 확인합니다.
-// systemd는 서비스 실행 시 INVOCATION_ID 환경 변수를 고유하게 주입합니다.
-func IsSystemd() bool {
-	return os.Getenv("INVOCATION_ID") != ""
+// ResolveLogPathAndFile 설정된 logs.path 값으로부터 저장 디렉토리와 파일명을 결정합니다.
+// 1. 설정 경로에 파일명(확장자 포함)이 포함되어 있으면 해당 파일명을 사용하고 디렉토리를 분리합니다.
+// 2. 설정 경로에 경로만 지정되어 있으면 파일명은 기본값 "state_sync.log"를 사용합니다.
+// 3. 디렉토리에 쓰기 권한이 없거나 미지정된 경우 Working directory 하위 log ("./log")에 저장합니다.
+func ResolveLogPathAndFile(configuredPath string) (dirPath string, filename string) {
+	trimmed := strings.TrimSpace(configuredPath)
+	if trimmed == "" {
+		return DefaultLogPath, DefaultLogFilename
+	}
+
+	targetDir := trimmed
+	targetFile := DefaultLogFilename
+
+	// 슬래시로 끝나지 않고 확장자가 있는 경우 파일명이 포함된 경로로 판단
+	hasTrailingSlash := strings.HasSuffix(trimmed, "/") || strings.HasSuffix(trimmed, "\\")
+	if !hasTrailingSlash && filepath.Ext(trimmed) != "" {
+		targetFile = filepath.Base(trimmed)
+		targetDir = filepath.Dir(trimmed)
+		if targetDir == "." || targetDir == "" {
+			targetDir = DefaultLogPath
+		}
+	}
+
+	// 디렉토리 쓰기 권한 확인
+	if canWrite(targetDir) {
+		return targetDir, targetFile
+	}
+
+	// 권한 부족 시 Working directory 하위 log로 대체
+	return DefaultLogPath, targetFile
 }
 
-// ResolveLogPath 로그 저장 디렉토리 경로를 환경과 권한에 따라 결정합니다.
-// 1. 경로가 명시적으로 지정된 경우:
-//    - 쓰기 권한이 있으면 해당 경로 사용
-//    - 쓰기 권한이 없으면 Working Directory 하위 log/ ("./log") 사용
-// 2. 경로가 미지정된 경우:
-//    - systemd 환경인 경우: "/var/log/aria-state-sync" 사용 (권한 부족 시 "./log")
-//    - 그렇지 않은 경우: Working Directory 하위 log/ ("./log") 사용
+// ResolveLogPath 로그 저장 디렉토리 경로를 결정합니다.
 func ResolveLogPath(configuredPath string) string {
-	trimmed := strings.TrimSpace(configuredPath)
-
-	// 1. 경로가 명시적으로 지정된 경우
-	if trimmed != "" {
-		if canWrite(trimmed) {
-			return trimmed
-		}
-		return DefaultWorkingLogPath
-	}
-
-	// 2. 경로가 미지정된 경우
-	if IsSystemd() {
-		if canWrite(DefaultSystemdLogPath) {
-			return DefaultSystemdLogPath
-		}
-		return DefaultWorkingLogPath
-	}
-
-	return DefaultWorkingLogPath
+	dir, _ := ResolveLogPathAndFile(configuredPath)
+	return dir
 }
 
 func canWrite(dir string) bool {
