@@ -1,52 +1,53 @@
 package pidfile
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 )
 
 const (
+	// DefaultPidDir 미지정 또는 fallback 시 기본 PID 디렉토리
+	DefaultPidDir = "./run"
 	// DefaultPidFile 미지정 시 기본 PID 파일 경로
-	DefaultPidFile = "/run/aria_state_sync.pid"
-	// FallbackPidFile 권한 부족 등으로 인해 기본 경로에 저장할 수 없을 때 사용하는 대체 경로
-	FallbackPidFile = "./run/aria_state_sync.pid"
+	DefaultPidFile = "./run/state_sync.pid"
 )
 
 // WritePID 설정된 경로 또는 기본 경로에 PID 파일을 저장합니다.
-// 접근 권한이 없는 경우 자동으로 Fallback 경로(./run/aria_state_sync.pid)에 저장합니다.
+// 경로가 지정되지 않았거나 지정된 경로에 권한이 없는 경우 Working directory 하위 run 디렉토리에 저장합니다.
 // 최종 저장된 파일의 경로를 반환합니다.
 func WritePID(configuredPath string) (string, error) {
 	targetPath := strings.TrimSpace(configuredPath)
-	if targetPath == "" {
-		targetPath = DefaultPidFile
-	}
-
 	pid := os.Getpid()
 
-	// 1차 시도: 대상 경로에 PID 저장
+	// 1. 경로가 미지정된 경우: 기본 경로(./run/state_sync.pid)에 바로 저장
+	if targetPath == "" {
+		if err := writeToFile(DefaultPidFile, pid); err != nil {
+			return "", fmt.Errorf("PID 파일 저장 실패 (%s): %w", DefaultPidFile, err)
+		}
+		return DefaultPidFile, nil
+	}
+
+	// 2. 경로가 지정된 경우: 해당 경로 저장 시도
 	err := writeToFile(targetPath, pid)
 	if err == nil {
 		return targetPath, nil
 	}
 
-	// 접근 권한 오류인 경우 fallback 경로 시도
-	if isPermissionError(err) {
-		fallbackPath := FallbackPidFile
-		if cleanPath(targetPath) != cleanPath(fallbackPath) {
-			if fbErr := writeToFile(fallbackPath, pid); fbErr == nil {
-				return fallbackPath, nil
-			} else {
-				return "", fmt.Errorf("PID 파일 저장 실패 (기본 경로 %s 권한 오류: %v, 대체 경로 %s 오류: %w)", targetPath, err, fallbackPath, fbErr)
-			}
-		}
+	// 권한 부족 등의 이유로 실패한 경우 Working directory 하위 run 디렉토리에 생성
+	fallbackFile := filepath.Base(targetPath)
+	if fallbackFile == "." || fallbackFile == "/" || fallbackFile == "" {
+		fallbackFile = "state_sync.pid"
+	}
+	fallbackPath := filepath.Join(DefaultPidDir, fallbackFile)
+
+	if fbErr := writeToFile(fallbackPath, pid); fbErr == nil {
+		return fallbackPath, nil
 	}
 
-	return "", fmt.Errorf("PID 파일 저장 실패 (%s): %w", targetPath, err)
+	return "", fmt.Errorf("PID 파일 저장 실패 (지정 경로 %s 오류: %v, 대체 경로 %s 오류)", targetPath, err, fallbackPath)
 }
 
 // RemovePID 지정된 PID 파일을 삭제합니다.
@@ -62,7 +63,6 @@ func RemovePID(path string) error {
 		if os.IsNotExist(err) {
 			return nil
 		}
-		// 읽을 수 없는 권한 오류 등이 아니라면 삭제 시도
 		return os.Remove(path)
 	}
 
@@ -91,25 +91,3 @@ func writeToFile(path string, pid int) error {
 	content := []byte(fmt.Sprintf("%d\n", pid))
 	return os.WriteFile(path, content, 0644)
 }
-
-func isPermissionError(err error) bool {
-	if err == nil {
-		return false
-	}
-	if os.IsPermission(err) {
-		return true
-	}
-	if errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.EPERM) {
-		return true
-	}
-	return false
-}
-
-func cleanPath(p string) string {
-	abs, err := filepath.Abs(p)
-	if err == nil {
-		return abs
-	}
-	return filepath.Clean(p)
-}
-

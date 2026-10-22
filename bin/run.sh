@@ -23,8 +23,8 @@ else
     BIN_FILE="$PROJECT_ROOT/bin/$APP_NAME"
 fi
 
-DEFAULT_PID_FILE="/run/aria_state_sync.pid"
-FALLBACK_PID_FILE="$PROJECT_ROOT/run/aria_state_sync.pid"
+DEFAULT_PID_FILE="$PROJECT_ROOT/run/state_sync.pid"
+FALLBACK_PID_FILE="$PROJECT_ROOT/run/state_sync.pid"
 PID_FILE=""
 TARGET_PID_FILE=""
 
@@ -152,24 +152,23 @@ resolve_pid_file() {
 
     if [ -n "$parsed_pid" ]; then
         TARGET_PID_FILE="$parsed_pid"
-    else
-        TARGET_PID_FILE="$DEFAULT_PID_FILE"
-    fi
-
-    # 이미 존재하는 PID 파일 확인
-    if [ -f "$TARGET_PID_FILE" ]; then
-        PID_FILE="$TARGET_PID_FILE"
-    elif [ -f "$FALLBACK_PID_FILE" ]; then
-        PID_FILE="$FALLBACK_PID_FILE"
-    else
-        # 접근 권한 확인: TARGET_PID_FILE의 부모 디렉토리에 쓰기 권한이 있는지 확인
         local target_dir
         target_dir="$(dirname "$TARGET_PID_FILE")"
-        if [ -d "$target_dir" ] && [ -w "$target_dir" ]; then
+        if [ -f "$TARGET_PID_FILE" ]; then
+            PID_FILE="$TARGET_PID_FILE"
+        elif [ -d "$target_dir" ] && [ -w "$target_dir" ]; then
             PID_FILE="$TARGET_PID_FILE"
         else
-            PID_FILE="$FALLBACK_PID_FILE"
+            local file_base
+            file_base="$(basename "$TARGET_PID_FILE")"
+            if [ -z "$file_base" ] || [ "$file_base" = "." ]; then
+                file_base="state_sync.pid"
+            fi
+            PID_FILE="$PROJECT_ROOT/run/$file_base"
         fi
+    else
+        TARGET_PID_FILE="$DEFAULT_PID_FILE"
+        PID_FILE="$DEFAULT_PID_FILE"
     fi
 }
 

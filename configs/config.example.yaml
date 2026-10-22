@@ -38,7 +38,6 @@ log:
 #───────────────────────────────────────────────
 # ── PID 파일 설정
 # ──
-# ── 미지정 시 기본값: /run/aria_state_sync.pid 
-# ── 권한 없을 시 ./run/aria_state_sync.pid
+# ── 미지정 또는 권한 없을 시 기본값: ./run/state_sync.pid
 # ──────────────────────────────────────────────
-# pid_file: "/run/aria_state_sync.pid"
+# pid_file: "./run/state_sync.pid"

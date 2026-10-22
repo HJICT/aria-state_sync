@@ -64,8 +64,7 @@ func main() {
 	zap.S().Infof("로그 저장 파일: %s/%s", logDir, logFile)
 
 	// [PID 파일 저장]
-	// 설정 파일의 pidFile 위치를 참조하며, 미지정 시 기본값은 /run/aria_state_sync.pid 입니다.
-	// 해당 경로에 쓰기 권한이 없는 경우 ./run/aria_state_sync.pid 에 저장합니다.
+	// 설정 파일의 pid_file 위치를 참조하며, 미지정 또는 권한 부족 시 Working directory 하위 run 디렉토리에 저장합니다.
 	pidPath, err := pidfile.WritePID(cfg.PidFile)
 	if err != nil {
 		zap.S().Fatalf("PID 파일 생성 실패: %v", err)

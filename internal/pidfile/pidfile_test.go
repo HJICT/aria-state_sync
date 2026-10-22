@@ -59,8 +59,9 @@ func TestWritePID_PermissionFallback(t *testing.T) {
 	}
 	defer RemovePID(savedPath)
 
-	if savedPath != FallbackPidFile {
-		t.Fatalf("expected fallback path %s, got %s", FallbackPidFile, savedPath)
+	expectedPath := filepath.Join(DefaultPidDir, "app.pid")
+	if savedPath != expectedPath {
+		t.Fatalf("expected fallback path %s, got %s", expectedPath, savedPath)
 	}
 
 	data, err := os.ReadFile(savedPath)
@@ -75,24 +76,25 @@ func TestWritePID_PermissionFallback(t *testing.T) {
 }
 
 func TestWritePID_DefaultPath(t *testing.T) {
-	// configuredPath가 빈 문자열일 때 DefaultPidFile("/run/aria_state_sync.pid") 시도.
-	// 일반 사용자 환경에서는 /run에 쓰기 권한이 없으므로 FallbackPidFile로 떨어져야 함.
+	// configuredPath가 빈 문자열일 때 DefaultPidFile("./run/state_sync.pid")에 바로 저장
 	savedPath, err := WritePID("")
 	if err != nil {
 		t.Fatalf("WritePID with empty path failed: %v", err)
 	}
 	defer RemovePID(savedPath)
 
-	if os.Geteuid() != 0 {
-		// Non-root user should fallback to FallbackPidFile
-		if savedPath != FallbackPidFile {
-			t.Fatalf("expected fallback path %s for non-root, got %s", FallbackPidFile, savedPath)
-		}
-	} else {
-		// Root user should succeed with DefaultPidFile
-		if savedPath != DefaultPidFile {
-			t.Fatalf("expected default path %s for root, got %s", DefaultPidFile, savedPath)
-		}
+	if savedPath != DefaultPidFile {
+		t.Fatalf("expected default path %s, got %s", DefaultPidFile, savedPath)
+	}
+
+	data, err := os.ReadFile(savedPath)
+	if err != nil {
+		t.Fatalf("failed to read default pid file: %v", err)
+	}
+
+	savedPid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || savedPid != os.Getpid() {
+		t.Fatalf("unexpected pid: %d (expected %d)", savedPid, os.Getpid())
 	}
 }
 
