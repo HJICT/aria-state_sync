@@ -86,7 +86,7 @@ type RedisConfig struct {
 
 // LogConfig 애플리케이션 로그 기록 및 관리 정책 설정입니다.
 type LogConfig struct {
-	Level      string `yaml:"level" mapstructure:"level"`             // 로그 레벨 (debug, info, warn, error)
+	Level      string `yaml:"level" mapstructure:"level"`             // 로그 레벨 (verbose, debug, info, warn, error)
 	Console    *bool  `yaml:"console" mapstructure:"console"`         // 콘솔(Stdout) 출력 여부 (미지정 시 기본값: true)
 	Path       string `yaml:"path" mapstructure:"path"`               // 로그 파일 저장 경로
 	Rotation   string `yaml:"rotation" mapstructure:"rotation"`       // 로그 롤링 방식 (daily, size)
@@ -197,7 +197,7 @@ func LoadConfig(appEnv, configPath string) (*Config, error) {
 	// yaml 파일 로드
 	data, err := os.ReadFile(targetPath)
 	if err != nil {
-		return nil, fmt.Errorf("설정 파일을 읽는 중 오류 발생: %w", err)
+		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
 
 	// [비즈니스 로직] 환경 변수 치환
@@ -212,13 +212,13 @@ func LoadConfig(appEnv, configPath string) (*Config, error) {
 		return v
 	})
 	if len(missingVars) > 0 {
-		return nil, fmt.Errorf("설정 파일의 환경 변수가 치환되지 않았습니다: %s", strings.Join(missingVars, ", "))
+		return nil, fmt.Errorf("environment variables in config file are not set: %s", strings.Join(missingVars, ", "))
 	}
 
 	// 최종적으로 설정 객체에 매핑
 	var cfg Config
 	if err := yaml.Unmarshal([]byte(expanded), &cfg); err != nil {
-		return nil, fmt.Errorf("설정 데이터를 구조체로 변환하는 중 오류 발생: %w", err)
+		return nil, fmt.Errorf("failed to parse config data: %w", err)
 	}
 
 	return &cfg, nil

@@ -25,7 +25,7 @@ sync:
 # ── Logs
 # ──────────────────────────────────────────────
 log:
-  level: "info"       # debug | info | warn | error
+  level: "info"       # verbose | debug | info | warn | error  (verbose: AMI 액션/이벤트 전체 필드 포함 최상세, debug: 처리 흐름 상세)
   console: false      # 콘솔(Stdout) 출력 여부 (true | false, 기본값: true)
   # path: "./log"     # 경로만 지정 시 state_sync.log 로 저장, 파일명까지 지정 시(예: ./log/app.log) 지정 파일명으로 저장
                       # 미지정 또는 권한 부족 시 Working directory 하위 log 에 저장

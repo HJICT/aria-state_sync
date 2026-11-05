@@ -25,7 +25,7 @@ func WritePID(configuredPath string) (string, error) {
 	// 1. 경로가 미지정된 경우: 기본 경로(./run/state_sync.pid)에 바로 저장
 	if targetPath == "" {
 		if err := writeToFile(DefaultPidFile, pid); err != nil {
-			return "", fmt.Errorf("PID 파일 저장 실패 (%s): %w", DefaultPidFile, err)
+			return "", fmt.Errorf("failed to write PID file (%s): %w", DefaultPidFile, err)
 		}
 		return DefaultPidFile, nil
 	}
@@ -47,7 +47,7 @@ func WritePID(configuredPath string) (string, error) {
 		return fallbackPath, nil
 	}
 
-	return "", fmt.Errorf("PID 파일 저장 실패 (지정 경로 %s 오류: %v, 대체 경로 %s 오류)", targetPath, err, fallbackPath)
+	return "", fmt.Errorf("failed to write PID file (path %s error: %v, fallback path %s also failed)", targetPath, err, fallbackPath)
 }
 
 // RemovePID 지정된 PID 파일을 삭제합니다.

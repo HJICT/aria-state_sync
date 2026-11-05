@@ -72,6 +72,10 @@ go build -o statesync-server cmd/server/main.go
 -   **Asterisk**: AMI 서버 호스트, 포트, 사용자 계정, 비밀번호.
 -   **Redis**: Redis 서버 주소, 포트, 인증 비밀번호.
 -   **Logs**: 로그 레벨, 저장 경로, 로테이션 설정(Max Size, Backups 등).
+    -   로그 레벨: `verbose` < `debug` < `info` < `warn` < `error` (왼쪽일수록 상세하며 하위 레벨을 모두 포함).
+    -   `debug`: AMI 액션 전송/응답 요약, 이벤트별 처리 흐름(버퍼 적재, 상태 변환, 무시된 이벤트 사유).
+    -   `verbose`: `debug` + AMI 액션/응답/이벤트 전체 필드 덤프(Secret/Password는 마스킹), 주기적 Ping 로그. 로그량이 많으므로 운영 환경에서는 비권장.
+    -   `dev` 환경에서는 설정과 무관하게 최소 `debug`로 동작합니다.
 
 ## 🗄️ Redis 데이터 구조
 
