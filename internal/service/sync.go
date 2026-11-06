@@ -133,7 +133,7 @@ func NewSyncService(ami *ami.AmiClient, redis *redis.RedisClient, syncInterval t
 
 // Start AMI 이벤트를 구독하고 Redis 동기화 로직을 실행합니다.
 func (s *SyncService) Start(ctx context.Context) {
-	zap.S().Info("[SyncService] Starting Asterisk-Redis state sync service.")
+	zap.S().Info("[SyncService] Asterisk-Redis 상태 동기화 서비스를 시작합니다.")
 
 	// EndpointList 이벤트 처리 (초기 및 주기 상태 정보 조회)
 	s.ami.SubscribeEvent("EndpointList", func(msg ami.Message) {
@@ -172,7 +172,7 @@ func (s *SyncService) Start(ctx context.Context) {
 
 	// AMI 재연결 시 초기 동기화 처리
 	s.ami.SubscribeEvent("_ClientConnected", func(msg ami.Message) {
-		zap.S().Info("[SyncService] AMI connected. Starting full state sync.")
+		zap.S().Info("[SyncService] AMI 연결됨. 전체 상태 동기화를 시작합니다.")
 		s.triggerFullSync(ctx)
 	})
 
@@ -185,15 +185,15 @@ func (s *SyncService) startPeriodicSync(ctx context.Context) {
 	ticker := time.NewTicker(s.syncInterval)
 	defer ticker.Stop()
 
-	zap.S().Infof("[SyncService] Periodic sync timer started (interval: %v).", s.syncInterval)
+	zap.S().Infof("[SyncService] 주기 동기화 타이머를 시작합니다. (주기: %v)", s.syncInterval)
 
 	for {
 		select {
 		case <-ctx.Done():
-			zap.S().Info("[SyncService] Stopping periodic sync goroutine.")
+			zap.S().Info("[SyncService] 주기 동기화 고루틴을 종료합니다.")
 			return
 		case <-ticker.C:
-			zap.S().Infof("[SyncService] Sync interval (%v) reached. Running full sync and cleanup of deleted endpoints.", s.syncInterval)
+			zap.S().Infof("[SyncService] 동기화 주기(%v) 도달. 전체 동기화 및 삭제 단말 정리를 실행합니다.", s.syncInterval)
 			s.triggerFullSync(ctx)
 		}
 	}
@@ -204,14 +204,13 @@ func (s *SyncService) triggerFullSync(ctx context.Context) {
 	s.bufferMu.Lock()
 	s.contactsRequested = false
 	s.bufferMu.Unlock()
-	zap.S().Debug("[SyncService] Full sync state reset (contactsRequested=false)")
 
-	zap.S().Info("[SyncService] Sending full sync request (PJSIPShowEndpoints).")
+	zap.S().Info("[SyncService] 전체 동기화 요청(PJSIPShowEndpoints)을 전송합니다.")
 	_, err := s.ami.Action(ami.Message{
 		"Action": "PJSIPShowEndpoints",
 	})
 	if err != nil {
-		zap.S().Errorf("[SyncService] PJSIPShowEndpoints request failed: %v", err)
+		zap.S().Errorf("[SyncService] PJSIPShowEndpoints 요청 실패: %v", err)
 	}
 }
 
@@ -222,15 +221,12 @@ func (s *SyncService) handlerEndpointList(ctx context.Context, msg ami.Message) 
 	conacts := msg["Contacts"]
 
 	if device == "" || state == "" {
-		zap.L().Warn("[EndPointList] Event has no usable data.")
-		logger.Verbosef("[EndPointList] Ignored event fields: ObjectName=%q, DeviceState=%q", device, state)
+		zap.S().Warnf("[EndPointList] 이벤트에 사용 가능한 데이터가 없습니다. (ObjectName=%q, DeviceState=%q)", device, state)
 		return
 	}
 
 	// IP주소 조회
 	ipaddr := extractSipIPv4(conacts)
-
-	zap.S().Debugf("[EndPointList] %s : %s(%s)", device, state, ipaddr)
 
 	// DeviceState 문자열을 표준 DeviceState 변환
 	deviceState := parseDeviceState(state)
@@ -258,16 +254,15 @@ func (s *SyncService) handlerEndpointList(ctx context.Context, msg ami.Message) 
 	} else if s.bufferTimer == nil {
 		// 첫 데이터 수신 시 5초 타이머 시작 (이벤트 누락 대비)
 		s.bufferTimer = time.AfterFunc(5*time.Second, func() {
-			zap.S().Warn("[SyncService] EndpointList timeout (5s). Updating with the data received so far.")
+			zap.S().Warn("[SyncService] EndpointList 타임아웃(5초). 수신된 데이터까지만 업데이트합니다.")
 			s.flushEndpointBuffer(ctx)
 		})
 	}
 	s.bufferMu.Unlock()
 
-	zap.S().Debugf("[EndPointList] Buffered: %s -> DeviceState=%s, Reachable=%s (buffered: %d, expected: %d)", device, deviceState, reachableState, bufLen, expected)
+	zap.S().Debugf("[EndPointList] 버퍼 저장: %s -> DeviceState=%s, Reachable=%s, IP=%s (버퍼: %d, 예상: %d)", device, deviceState, reachableState, ipaddr, bufLen, expected)
 
 	if shouldFlush {
-		zap.S().Infof("[EndPointList] All device info received. Updating Redis.")
 		s.flushEndpointBuffer(ctx)
 	}
 }
@@ -276,10 +271,10 @@ func (s *SyncService) handlerEndpointList(ctx context.Context, msg ami.Message) 
 func (s *SyncService) handlerEndpointListComplete(ctx context.Context, msg ami.Message) {
 
 	listItemsStr := msg["ListItems"]
-	zap.S().Debugf("[EndPointListComplete] Complete event received (ListItems: %q)", listItemsStr)
+	zap.S().Debugf("[EndPointListComplete] 완료 이벤트 수신 (ListItems: %q)", listItemsStr)
 	listItems, err := strconv.Atoi(listItemsStr)
 	if err != nil {
-		zap.S().Warnf("[EndPointListComplete] Failed to parse ListItems: %v. Updating now.", err)
+		zap.S().Warnf("[EndPointListComplete] ListItems 파싱 실패: %v. 즉시 업데이트합니다.", err)
 		s.flushEndpointBuffer(ctx)
 		return
 	}
@@ -291,10 +286,9 @@ func (s *SyncService) handlerEndpointListComplete(ctx context.Context, msg ami.M
 	s.bufferMu.Unlock()
 
 	if shouldFlush {
-		zap.S().Infof("[EndPointListComplete] All %d devices received. Starting Redis update.", listItems)
 		s.flushEndpointBuffer(ctx)
 	} else {
-		zap.S().Infof("[EndPointListComplete] Waiting for more data (expected: %d, current: %d).", listItems, currentCount)
+		zap.S().Debugf("[EndPointListComplete] 추가 데이터 대기 중 (예상: %d, 현재: %d)", listItems, currentCount)
 	}
 }
 
@@ -316,7 +310,7 @@ func (s *SyncService) flushEndpointBuffer(ctx context.Context) {
 	s.bufferMu.Unlock()
 
 	if len(buffer) == 0 {
-		zap.S().Debug("[SyncService] Endpoint buffer is empty. Skipping flush.")
+		zap.S().Debug("[SyncService] 단말 버퍼가 비어 있어 업데이트를 건너뜁니다.")
 		return
 	}
 
@@ -324,7 +318,7 @@ func (s *SyncService) flushEndpointBuffer(ctx context.Context) {
 	s.cleanupDeletedEndpoints(ctx, buffer)
 
 	// 2. EndpointList에서 조회된 단말 기준으로 Redis 일괄 업데이트 (Pipeline 배치 처리)
-	zap.S().Infof("[SyncService] Updating %d endpoints in Redis (pipeline).", len(buffer))
+	zap.S().Infof("[SyncService] Redis에 단말 %d개를 업데이트합니다. (Pipeline)", len(buffer))
 
 	devices := make([]string, 0, len(buffer))
 	for d := range buffer {
@@ -421,7 +415,7 @@ func (s *SyncService) flushEndpointBuffer(ctx context.Context) {
 		}
 
 		if _, err := pipe.Exec(ctx); err != nil {
-			zap.S().Errorf("[SyncService] Endpoint state pipeline update failed: %v", err)
+			zap.S().Errorf("[Redis] 단말 상태 Pipeline 업데이트 실패: %v", err)
 		}
 	}
 
@@ -446,7 +440,7 @@ func (s *SyncService) cleanupDeletedEndpoints(ctx context.Context, currentEndpoi
 		}
 	}
 	if err := iter.Err(); err != nil {
-		zap.S().Warnf("[SyncService] SCAN failed while cleaning up deleted endpoints: %v", err)
+		zap.S().Errorf("[Redis] 삭제 단말 정리 중 SCAN 실패: %v", err)
 		return
 	}
 
@@ -457,11 +451,11 @@ func (s *SyncService) cleanupDeletedEndpoints(ctx context.Context, currentEndpoi
 	// 일괄 삭제할 키 목록 수집
 	keysToDelete := make([]string, 0, len(deletedExtens)*2)
 	for exten := range deletedExtens {
+		zap.S().Debugf("[SyncService] 삭제된 단말 발견: exten=%s", exten)
 		keysToDelete = append(keysToDelete,
 			fmt.Sprintf("asterisk:exten:%s:device_state", exten),
 			fmt.Sprintf("asterisk:exten:%s:reachability", exten),
 		)
-		zap.S().Debugf("[SyncService] Deleted endpoint found: exten=%s", exten)
 	}
 
 	// 청크 단위(500개)로 분할하여 Del 일괄 삭제
@@ -473,11 +467,11 @@ func (s *SyncService) cleanupDeletedEndpoints(ctx context.Context, currentEndpoi
 		}
 		chunk := keysToDelete[i:end]
 		if err := s.redis.Del(ctx, chunk...).Err(); err != nil {
-			zap.S().Errorf("[SyncService] Failed to remove keys of deleted endpoints: %v", err)
+			zap.S().Errorf("[Redis] 삭제된 단말의 키 제거 실패: %v", err)
 		}
 	}
 
-	zap.S().Infof("[SyncService] Removed %d deleted endpoints (%d keys) from Redis.", len(deletedExtens), len(keysToDelete))
+	zap.S().Infof("[SyncService] Redis에서 삭제된 단말 %d개(키 %d개)를 제거했습니다.", len(deletedExtens), len(keysToDelete))
 }
 
 // requestContacts Contact 및 UserAgent 조회를 위해 PJSIPShowContacts 액션을 전송합니다.
@@ -500,13 +494,13 @@ func (s *SyncService) requestContacts(ctx context.Context) {
 	}
 	s.contactMu.Unlock()
 
-	zap.S().Info("[SyncService] Requesting contact list (PJSIPShowContacts) to update UserAgent.")
+	zap.S().Info("[SyncService] UserAgent 갱신을 위해 Contact 목록(PJSIPShowContacts)을 요청합니다.")
 
 	_, err := s.ami.Action(ami.Message{
 		"Action": "PJSIPShowContacts",
 	})
 	if err != nil {
-		zap.S().Errorf("[SyncService] PJSIPShowContacts request failed: %v", err)
+		zap.S().Errorf("[SyncService] PJSIPShowContacts 요청 실패: %v", err)
 	}
 }
 
@@ -518,7 +512,7 @@ func (s *SyncService) handlerContactList(ctx context.Context, msg ami.Message) {
 	uri := msg["Uri"]
 
 	if endpoint == "" || userAgent == "" {
-		zap.S().Debugf("[ContactList] Ignored, missing required field: Endpoint=%q, UserAgent=%q", endpoint, userAgent)
+		zap.S().Debugf("[ContactList] 필수 필드 누락으로 무시: Endpoint=%q, UserAgent=%q", endpoint, userAgent)
 		return
 	}
 
@@ -541,16 +535,15 @@ func (s *SyncService) handlerContactList(ctx context.Context, msg ami.Message) {
 	} else if s.contactBufferTimer == nil {
 		// 첫 데이터 수신 시 5초 타임아웃 타이머 시작 (이벤트 누락 대비)
 		s.contactBufferTimer = time.AfterFunc(5*time.Second, func() {
-			zap.S().Warn("[SyncService] ContactList timeout (5s). Updating with the contacts received so far.")
+			zap.S().Warn("[SyncService] ContactList 타임아웃(5초). 수신된 Contact까지만 업데이트합니다.")
 			s.flushContactBuffer(ctx)
 		})
 	}
 	s.contactMu.Unlock()
 
-	zap.S().Debugf("[ContactList] Buffered: %s -> IP=%s, UA=%s (buffered: %d, expected: %d)", endpoint, ip, userAgent, bufLen, expected)
+	zap.S().Debugf("[ContactList] 버퍼 저장: %s -> IP=%s, UA=%s (버퍼: %d, 예상: %d)", endpoint, ip, userAgent, bufLen, expected)
 
 	if shouldFlush {
-		zap.S().Infof("[ContactList] All contact info received. Updating Redis.")
 		s.flushContactBuffer(ctx)
 	}
 }
@@ -558,10 +551,10 @@ func (s *SyncService) handlerContactList(ctx context.Context, msg ami.Message) {
 // handlerContactListComplete Contact 조회 완료 이벤트를 처리합니다.
 func (s *SyncService) handlerContactListComplete(ctx context.Context, msg ami.Message) {
 	listItemsStr := msg["ListItems"]
-	zap.S().Debugf("[ContactListComplete] Complete event received (ListItems: %q)", listItemsStr)
+	zap.S().Debugf("[ContactListComplete] 완료 이벤트 수신 (ListItems: %q)", listItemsStr)
 	listItems, err := strconv.Atoi(listItemsStr)
 	if err != nil {
-		zap.S().Warnf("[ContactListComplete] Failed to parse ListItems: %v. Updating now.", err)
+		zap.S().Warnf("[ContactListComplete] ListItems 파싱 실패: %v. 즉시 업데이트합니다.", err)
 		s.flushContactBuffer(ctx)
 		return
 	}
@@ -573,10 +566,9 @@ func (s *SyncService) handlerContactListComplete(ctx context.Context, msg ami.Me
 	s.contactMu.Unlock()
 
 	if shouldFlush {
-		zap.S().Infof("[ContactListComplete] All %d contacts received. Starting Redis update.", listItems)
 		s.flushContactBuffer(ctx)
 	} else {
-		zap.S().Infof("[ContactListComplete] Waiting for more contacts (expected: %d, current: %d).", listItems, currentCount)
+		zap.S().Debugf("[ContactListComplete] 추가 Contact 대기 중 (예상: %d, 현재: %d)", listItems, currentCount)
 	}
 }
 
@@ -596,11 +588,11 @@ func (s *SyncService) flushContactBuffer(ctx context.Context) {
 	s.contactMu.Unlock()
 
 	if len(buffer) == 0 {
-		zap.S().Debug("[SyncService] Contact buffer is empty. Skipping flush.")
+		zap.S().Debug("[SyncService] Contact 버퍼가 비어 있어 업데이트를 건너뜁니다.")
 		return
 	}
 
-	zap.S().Infof("[ContactList] Updating %d contacts in Redis (pipeline).", len(buffer))
+	zap.S().Infof("[ContactList] Redis에 Contact %d개를 업데이트합니다. (Pipeline)", len(buffer))
 
 	contacts := make([]ContactItem, 0, len(buffer))
 	for _, item := range buffer {
@@ -621,11 +613,11 @@ func (s *SyncService) flushContactBuffer(ctx context.Context) {
 			updateContactScript.Run(ctx, pipe, []string{reachKey}, item.UserAgent, item.IPAddress)
 		}
 		if _, err := pipe.Exec(ctx); err != nil {
-			zap.S().Errorf("[Redis] ContactList pipeline update failed: %v", err)
+			zap.S().Errorf("[Redis] ContactList Pipeline 업데이트 실패: %v", err)
 		}
 	}
 
-	zap.S().Infof("[ContactList] Updated UserAgent for %d contacts.", len(contacts))
+	zap.S().Infof("[ContactList] Contact %d개의 UserAgent를 업데이트했습니다.", len(contacts))
 }
 
 // handlerContactStateChange 장치 상태 변화(ContactStatus)의 이벤트를 처리합니다.
@@ -636,8 +628,7 @@ func (s *SyncService) handlerContactStateChange(ctx context.Context, msg ami.Mes
 	uri := msg["URI"]
 
 	if device == "" || state == "" {
-		zap.S().Warn("[ContactState] Event has no usable data.")
-		logger.Verbosef("[ContactState] Ignored event fields: EndpointName=%q, ContactStatus=%q, URI=%q", device, state, uri)
+		zap.S().Warnf("[ContactState] 이벤트에 사용 가능한 데이터가 없습니다. (EndpointName=%q, ContactStatus=%q, URI=%q)", device, state, uri)
 		return
 	}
 
@@ -653,7 +644,7 @@ func (s *SyncService) handlerContactStateChange(ctx context.Context, msg ami.Mes
 		deviceState = DeviceStateUnavailable
 	}
 
-	zap.S().Debugf("[ContactState] State mapped: %s ContactStatus=%s -> Reachable=%s, DeviceState=%s", device, state, reachableState, deviceState)
+	zap.S().Debugf("[ContactState] 상태 매핑: %s ContactStatus=%s -> Reachable=%s, DeviceState=%s", device, state, reachableState, deviceState)
 
 	// 기존 Redis에 저장된 user_agent 확인
 	prevUA, _ := s.redis.HGet(ctx, fmt.Sprintf("asterisk:exten:%s:reachability", device), "user_agent").Result()
@@ -721,7 +712,7 @@ func (s *SyncService) saveEndpointStateAndPublish(ctx context.Context, exten str
 	}
 
 	if _, err := pipe.Exec(ctx); err != nil {
-		zap.S().Errorf("[Redis] Endpoint state pipeline save failed (exten: %s): %v", exten, err)
+		zap.S().Errorf("[Redis] 단말 상태 Pipeline 저장 실패 (Exten: %s): %v", exten, err)
 	}
 }
 
@@ -735,7 +726,7 @@ func (s *SyncService) triggerDebouncedContactSync(ctx context.Context) {
 	}
 
 	s.contactSyncTimer = time.AfterFunc(1*time.Second, func() {
-		zap.S().Info("[SyncService] New endpoint without UserAgent found. Requesting contact list (PJSIPShowContacts).")
+		zap.S().Info("[SyncService] UserAgent가 없는 신규 단말을 발견했습니다. Contact 목록(PJSIPShowContacts)을 요청합니다.")
 		s.bufferMu.Lock()
 		s.contactsRequested = false
 		s.bufferMu.Unlock()
@@ -751,28 +742,31 @@ func (s *SyncService) handlerNewStateChange(ctx context.Context, msg ami.Message
 	connectedLineNum := msg["ConnectedLineNum"]
 	connectedLineName := msg["ConnectedLineName"]
 
-	if (exten == "" || strings.Contains(exten, "unknown")) || stateStr == "" {
-		zap.S().Warn("[NewState] Event has no usable data.")
-		logger.Verbosef("[NewState] Ignored event fields: Channel=%q, ChannelState=%q", msg["Channel"], stateStr)
+	if exten == "" || strings.Contains(exten, "unknown") {
+		zap.S().Warnf("[NewState] 내선번호를 확인할 수 없어 무시: Channel=%q, ChannelState=%q", msg["Channel"], stateStr)
+		return
+	}
+	if stateStr == "" {
+		zap.S().Warnf("[NewState] ChannelState 값이 비어 있어 무시: Exten=%s, Channel=%q", exten, msg["Channel"])
 		return
 	}
 
 	stateInt, err := strconv.Atoi(stateStr)
 	if err != nil {
-		zap.S().Warnf("[NewState] Failed to convert ChannelState to a number: %v", err)
+		zap.S().Warnf("[NewState] ChannelState 숫자 변환 실패: %v", err)
 		return
 	}
 
 	// 이벤트 필터링 (Ring, Ringing, Up, Busy 만 처리)
 	if !slices.Contains([]int{chanStateRing, chanStateRinging, chanStateUp, chanStateBusy}, stateInt) {
-		zap.S().Debugf("[NewState] Ignored, channel state not handled: %s (ChannelState=%d, Channel=%s)", exten, stateInt, msg["Channel"])
+		zap.S().Debugf("[NewState] 처리 대상이 아닌 채널 상태로 무시: %s (ChannelState=%d, Channel=%s)", exten, stateInt, msg["Channel"])
 		return
 	}
 
 	// 정수형 ChannelState를 표준 DeviceState로 변환
 	deviceState := parseChannelState(stateInt)
 
-	zap.S().Debugf("[NewState] Detail: Channel=%s, ChannelState=%d, ConnectedLineName=%q", msg["Channel"], stateInt, connectedLineName)
+	logger.Verbosef("[NewState] 상세: Channel=%s, ChannelState=%d, ConnectedLineName=%q", msg["Channel"], stateInt, connectedLineName)
 	zap.S().Infof("[NewState] %s(%s) -> %s", exten, deviceState, connectedLineNum)
 	s.updateDeviceState(ctx, exten, connectedLineNum, connectedLineName, deviceState)
 }
@@ -783,12 +777,12 @@ func (s *SyncService) handlerHangup(ctx context.Context, msg ami.Message) {
 	exten := extractExtenFromChannel(msg["Channel"])
 	deviceState := msg["ChannelStateDesc"]
 	if exten == "" || strings.Contains(exten, "unknown") {
-		zap.S().Warnf("[Hangup] Cannot get extension number. (Channel: %s)", msg["Channel"])
+		zap.S().Warnf("[Hangup] 내선번호를 확인할 수 없어 무시: Channel=%s", msg["Channel"])
 		return
 	}
 
-	zap.S().Debugf("[Hangup] Detail: Channel=%s, Cause=%s(%s)", msg["Channel"], msg["Cause"], msg["Cause-txt"])
-	zap.S().Infof("[Hangup] %s call ended (%s)", exten, deviceState)
+	logger.Verbosef("[Hangup] 상세: Channel=%s, Cause=%s(%s)", msg["Channel"], msg["Cause"], msg["Cause-txt"])
+	zap.S().Infof("[Hangup] %s 통화 종료 (%s)", exten, deviceState)
 	s.updateDeviceState(ctx, exten, "", "", DeviceStateIdle)
 }
 
@@ -812,7 +806,7 @@ func (s *SyncService) updateDeviceState(ctx context.Context, exten string,
 		"connected_line_name", connectedLineName).Err()
 
 	if err != nil {
-		zap.S().Errorf("[Redis] Failed to save DeviceState (Exten: %s, State: %s): %v", exten, state, err)
+		zap.S().Errorf("[Redis] DeviceState 저장 실패 (Exten: %s, State: %s): %v", exten, state, err)
 		return
 	}
 
@@ -842,7 +836,7 @@ func (s *SyncService) updateReachableState(ctx context.Context,
 		"user_agent", userAgent).Err()
 
 	if err != nil {
-		zap.S().Errorf("[Redis] Failed to save ReachableState (Exten: %s, State: %s): %v", exten, state, err)
+		zap.S().Errorf("[Redis] ReachableState 저장 실패 (Exten: %s, State: %s): %v", exten, state, err)
 		return
 	}
 
@@ -863,12 +857,12 @@ func (s *SyncService) updateReachableState(ctx context.Context,
 func (s *SyncService) publishEvent(ctx context.Context, channel string, eventName string, event any) {
 	payload, err := json.Marshal(event)
 	if err != nil {
-		zap.S().Errorf("[Redis] Failed to serialize %s event: %v", eventName, err)
+		zap.S().Errorf("[Redis] %s 이벤트 직렬화 실패: %v", eventName, err)
 		return
 	}
 
 	if err := s.redis.Publish(ctx, channel, payload).Err(); err != nil {
-		zap.S().Errorf("[Redis] Failed to publish %s event (Channel: %s): %v", eventName, channel, err)
+		zap.S().Errorf("[Redis] %s 이벤트 발행 실패 (Channel: %s): %v", eventName, channel, err)
 	}
 }
 

@@ -61,20 +61,20 @@ func main() {
 	defer logger.Sync()
 
 	zap.S().Infof("=== %s ===", version.Info())
-	zap.S().Infof("Log file: %s/%s", logDir, logFile)
+	zap.S().Infof("로그 파일: %s/%s", logDir, logFile)
 
 	// [PID 파일 저장]
 	// 설정 파일의 pid_file 위치를 참조하며, 미지정 또는 권한 부족 시 Working directory 하위 run 디렉토리에 저장합니다.
 	pidPath, err := pidfile.WritePID(cfg.PidFile)
 	if err != nil {
-		zap.S().Fatalf("Failed to create PID file: %v", err)
+		zap.S().Fatalf("PID 파일 생성 실패: %v", err)
 	}
-	zap.S().Infof("PID file created: %s (PID: %d)", pidPath, os.Getpid())
+	zap.S().Infof("PID 파일 생성: %s (PID: %d)", pidPath, os.Getpid())
 	defer func() {
 		if err := pidfile.RemovePID(pidPath); err != nil {
-			zap.S().Warnf("Failed to remove PID file: %v", err)
+			zap.S().Warnf("PID 파일 삭제 실패: %v", err)
 		} else {
-			zap.S().Infof("PID file removed: %s", pidPath)
+			zap.S().Infof("PID 파일 삭제: %s", pidPath)
 		}
 	}()
 
@@ -83,16 +83,13 @@ func main() {
 	defer stop()
 	redisClient, err := redis.NewClient(ctx, zap.S(), cfg.Redis.Host, cfg.Redis.Port, cfg.Redis.Pass)
 	if err != nil {
-		zap.S().Fatalf("Failed to initialize Redis: %v", err)
+		zap.S().Fatalf("Redis 초기화 실패: %v", err)
 	}
 	defer redisClient.Close()
 
 	// [검증 및 로그 출력] 로드된 설정 확인
-	zap.S().Info("=== Configuration loaded ===")
-	zap.S().Infof("Asterisk server: %s:%d", cfg.Asterisk.Host, cfg.Asterisk.Port)
-	zap.S().Infof("Asterisk user: %s", cfg.Asterisk.User)
-	zap.S().Infof("Redis server:    %s:%d", cfg.Redis.Host, cfg.Redis.Port)
-	zap.S().Infof("Sync interval:   %s", cfg.Sync.GetInterval())
+	zap.S().Infof("설정 로드 완료: Asterisk=%s:%d (user=%s), Redis=%s:%d, 동기화 주기=%s",
+		cfg.Asterisk.Host, cfg.Asterisk.Port, cfg.Asterisk.User, cfg.Redis.Host, cfg.Redis.Port, cfg.Sync.GetInterval())
 
 	// [Asterisk AMI 연결 설정]
 	amiClient := ami.New(ctx, zap.S(), cfg.Asterisk.Host, cfg.Asterisk.Port, cfg.Asterisk.User, cfg.Asterisk.Pass)
@@ -105,14 +102,14 @@ func main() {
 	// 프로그램 종료 시 연결을 안전하게 닫습니다.
 	defer amiClient.Close()
 
-	zap.S().Info("=== Connecting to Asterisk AMI ===")
+	zap.S().Info("Asterisk AMI에 연결합니다.")
 	if err := amiClient.Connect(); err != nil {
-		zap.S().Fatalf("Asterisk AMI connection error: %v", err)
+		zap.S().Fatalf("Asterisk AMI 연결 오류: %v", err)
 	}
 
-	zap.S().Info("Initialization complete. The server is running.")
+	zap.S().Info("초기화 완료. 서버가 실행 중입니다.")
 
 	// SIGINT/SIGTERM 수신 시까지 대기 후 정상 종료(defer된 리소스 정리 수행)
 	<-ctx.Done()
-	zap.S().Info("Shutdown signal received. Starting graceful shutdown.")
+	zap.S().Info("종료 신호를 수신했습니다. 정상 종료를 시작합니다.")
 }
