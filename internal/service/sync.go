@@ -199,16 +199,35 @@ func (s *SyncService) startPeriodicSync(ctx context.Context) {
 	}
 }
 
+// checkActionResponse AMI 액션 응답이 Success가 아니면(예: 권한 부족, 잘못된 액션) 에러로 변환합니다.
+// Action은 AMI가 Response: Error로 응답해도 err 없이 반환하므로 호출자가 직접 확인해야 합니다.
+func checkActionResponse(resp ami.Message) error {
+	if resp["Response"] == "Success" {
+		return nil
+	}
+	return fmt.Errorf("AMI 응답 실패: Response=%q, Message=%q", resp["Response"], resp["Message"])
+}
+
 // triggerFullSync 전체 상태 동기화 요청(PJSIPShowEndpoints)을 전송합니다.
 func (s *SyncService) triggerFullSync(ctx context.Context) {
+	// 이전 동기화(재접속으로 중단된 경우 등)에서 남은 부분 데이터가 새 동기화와 섞이지 않도록 초기화합니다.
 	s.bufferMu.Lock()
 	s.contactsRequested = false
+	s.endpointBuffer = make(map[string]EndpointData)
+	s.expectedItems = 0
+	if s.bufferTimer != nil {
+		s.bufferTimer.Stop()
+		s.bufferTimer = nil
+	}
 	s.bufferMu.Unlock()
 
 	zap.S().Info("[SyncService] 전체 동기화 요청(PJSIPShowEndpoints)을 전송합니다.")
-	_, err := s.ami.Action(ami.Message{
+	resp, err := s.ami.ActionContext(ctx, ami.Message{
 		"Action": "PJSIPShowEndpoints",
 	})
+	if err == nil {
+		err = checkActionResponse(resp)
+	}
 	if err != nil {
 		zap.S().Errorf("[SyncService] PJSIPShowEndpoints 요청 실패: %v", err)
 	}
@@ -254,8 +273,8 @@ func (s *SyncService) handlerEndpointList(ctx context.Context, msg ami.Message) 
 	} else if s.bufferTimer == nil {
 		// 첫 데이터 수신 시 5초 타이머 시작 (이벤트 누락 대비)
 		s.bufferTimer = time.AfterFunc(5*time.Second, func() {
-			zap.S().Warn("[SyncService] EndpointList 타임아웃(5초). 수신된 데이터까지만 업데이트합니다.")
-			s.flushEndpointBuffer(ctx)
+			zap.S().Warn("[SyncService] EndpointList 타임아웃(5초). 수신된 데이터까지만 업데이트합니다. (삭제 단말 정리는 건너뜁니다)")
+			s.flushEndpointBuffer(ctx, false)
 		})
 	}
 	s.bufferMu.Unlock()
@@ -263,7 +282,8 @@ func (s *SyncService) handlerEndpointList(ctx context.Context, msg ami.Message) 
 	zap.S().Debugf("[EndPointList] 버퍼 저장: %s -> DeviceState=%s, Reachable=%s, IP=%s (버퍼: %d, 예상: %d)", device, deviceState, reachableState, ipaddr, bufLen, expected)
 
 	if shouldFlush {
-		s.flushEndpointBuffer(ctx)
+		// expectedItems를 모두 수신했으므로 완전한 목록입니다.
+		s.flushEndpointBuffer(ctx, true)
 	}
 }
 
@@ -274,8 +294,8 @@ func (s *SyncService) handlerEndpointListComplete(ctx context.Context, msg ami.M
 	zap.S().Debugf("[EndPointListComplete] 완료 이벤트 수신 (ListItems: %q)", listItemsStr)
 	listItems, err := strconv.Atoi(listItemsStr)
 	if err != nil {
-		zap.S().Warnf("[EndPointListComplete] ListItems 파싱 실패: %v. 즉시 업데이트합니다.", err)
-		s.flushEndpointBuffer(ctx)
+		zap.S().Warnf("[EndPointListComplete] ListItems 파싱 실패: %v. 즉시 업데이트합니다. (삭제 단말 정리는 건너뜁니다)", err)
+		s.flushEndpointBuffer(ctx, false)
 		return
 	}
 
@@ -286,14 +306,16 @@ func (s *SyncService) handlerEndpointListComplete(ctx context.Context, msg ami.M
 	s.bufferMu.Unlock()
 
 	if shouldFlush {
-		s.flushEndpointBuffer(ctx)
+		s.flushEndpointBuffer(ctx, true)
 	} else {
 		zap.S().Debugf("[EndPointListComplete] 추가 데이터 대기 중 (예상: %d, 현재: %d)", listItems, currentCount)
 	}
 }
 
 // flushEndpointBuffer EndpointList에서 조회된 단말 기준으로 Redis를 Pipeline으로 일괄 업데이트하고, 삭제된 단말을 제거한 뒤 ContactList 조회를 요청합니다.
-func (s *SyncService) flushEndpointBuffer(ctx context.Context) {
+// complete가 true일 때만 삭제된 단말을 정리합니다. 타임아웃 등으로 일부만 수신한 버퍼를 기준으로 정리하면
+// 수신하지 못한 정상 단말의 키까지 삭제되기 때문입니다.
+func (s *SyncService) flushEndpointBuffer(ctx context.Context, complete bool) {
 
 	s.bufferMu.Lock()
 
@@ -315,7 +337,11 @@ func (s *SyncService) flushEndpointBuffer(ctx context.Context) {
 	}
 
 	// 1. Asterisk에서 삭제된 단말 제거 (SCAN 기반 안전한 키 정리)
-	s.cleanupDeletedEndpoints(ctx, buffer)
+	if complete {
+		s.cleanupDeletedEndpoints(ctx, buffer)
+	} else {
+		zap.S().Warn("[SyncService] 불완전한 단말 목록이므로 삭제된 단말 정리를 건너뜁니다.")
+	}
 
 	// 2. EndpointList에서 조회된 단말 기준으로 Redis 일괄 업데이트 (Pipeline 배치 처리)
 	zap.S().Infof("[SyncService] Redis에 단말 %d개를 업데이트합니다. (Pipeline)", len(buffer))
@@ -496,9 +522,12 @@ func (s *SyncService) requestContacts(ctx context.Context) {
 
 	zap.S().Info("[SyncService] UserAgent 갱신을 위해 Contact 목록(PJSIPShowContacts)을 요청합니다.")
 
-	_, err := s.ami.Action(ami.Message{
+	resp, err := s.ami.ActionContext(ctx, ami.Message{
 		"Action": "PJSIPShowContacts",
 	})
+	if err == nil {
+		err = checkActionResponse(resp)
+	}
 	if err != nil {
 		zap.S().Errorf("[SyncService] PJSIPShowContacts 요청 실패: %v", err)
 	}

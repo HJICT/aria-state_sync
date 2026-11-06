@@ -1,6 +1,10 @@
 package service
 
-import "testing"
+import (
+	"testing"
+
+	ami "common_lib/asterisk"
+)
 
 func TestExtractExtenFromChannel(t *testing.T) {
 	tests := []struct {
@@ -50,3 +54,14 @@ func TestExtractExtenFromChannel(t *testing.T) {
 	}
 }
 
+func TestCheckActionResponse(t *testing.T) {
+	if err := checkActionResponse(ami.Message{"Response": "Success"}); err != nil {
+		t.Errorf("Success 응답은 에러가 아니어야 합니다: %v", err)
+	}
+	if err := checkActionResponse(ami.Message{"Response": "Error", "Message": "Permission denied"}); err == nil {
+		t.Error("Error 응답은 에러여야 합니다")
+	}
+	if err := checkActionResponse(ami.Message{}); err == nil {
+		t.Error("Response 헤더가 없으면 에러여야 합니다")
+	}
+}
