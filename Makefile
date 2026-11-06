@@ -18,7 +18,7 @@ all: build
 
 ## build: Build the binary with version information.
 build:
-	@echo "⚙️  Building $(BINARY_NAME) (Version: $(VERSION), Commit: $(GIT_COMMIT), BuildDate: $(BUILD_DATE))..."
+	@echo "📝 Building $(BINARY_NAME) (Version: $(VERSION), Commit: $(GIT_COMMIT), BuildDate: $(BUILD_DATE))..."
 	@mkdir -p $(BUILD_DIR)
 	go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY_NAME) $(MAIN_FILE)
 
@@ -30,7 +30,7 @@ version:
 
 ## clean: Remove built binary.
 clean:
-	@echo "🪄 Cleaning..."
+	@echo "🧹 Cleaning..."
 	rm -rf $(BUILD_DIR)/$(BINARY_NAME)
 
 ## help: Show available targets.
