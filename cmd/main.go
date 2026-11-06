@@ -20,6 +20,13 @@ import (
 )
 
 func main() {
+	// os.Exit은 defer를 실행하지 않으므로, 모든 정리 작업은 run() 안의 defer에서 끝낸 뒤 종료 코드만 전달합니다.
+	os.Exit(run())
+}
+
+// run 서비스를 초기화하고 종료 신호까지 실행합니다. 반환값은 프로세스 종료 코드입니다.
+// 실패 시 Fatal 대신 에러를 로그로 남기고 1을 반환하여, PID 파일 삭제와 로거 flush 등 defer가 항상 실행되게 합니다.
+func run() int {
 
 	// Command line parsing
 	showVersion := pflag.BoolP("version", "v", false, "Show version information and exit")
@@ -29,14 +36,15 @@ func main() {
 
 	if *showVersion {
 		fmt.Println(version.Info())
-		os.Exit(0)
+		return 0
 	}
 
 	// [설정 로드] YAML 설정 파일 읽기
 	cfg, err := config.LoadConfig(*appEnv, *configPath)
 	if err != nil {
-		// 로거 초기화 전이므로 표준 log 사용
-		panic(err)
+		// 로거 초기화 전이므로 표준 에러 출력 사용
+		fmt.Fprintf(os.Stderr, "설정 로드 실패: %v\n", err)
+		return 1
 	}
 
 	// [로거 초기화]
@@ -56,7 +64,8 @@ func main() {
 		Compress:   cfg.Log.Compress,
 	}
 	if err := logger.Init(*appEnv, logCfg); err != nil {
-		panic(err)
+		fmt.Fprintf(os.Stderr, "로거 초기화 실패: %v\n", err)
+		return 1
 	}
 	defer logger.Sync()
 
@@ -67,7 +76,8 @@ func main() {
 	// 설정 파일의 pid_file 위치를 참조하며, 미지정 또는 권한 부족 시 Working directory 하위 run 디렉토리에 저장합니다.
 	pidPath, err := pidfile.WritePID(cfg.PidFile)
 	if err != nil {
-		zap.S().Fatalf("PID 파일 생성 실패: %v", err)
+		zap.S().Errorf("PID 파일 생성 실패: %v", err)
+		return 1
 	}
 	zap.S().Infof("PID 파일 생성: %s (PID: %d)", pidPath, os.Getpid())
 	defer func() {
@@ -83,7 +93,8 @@ func main() {
 	defer stop()
 	redisClient, err := redis.NewClient(ctx, zap.S(), cfg.Redis.Host, cfg.Redis.Port, cfg.Redis.Pass)
 	if err != nil {
-		zap.S().Fatalf("Redis 초기화 실패: %v", err)
+		zap.S().Errorf("Redis 초기화 실패: %v", err)
+		return 1
 	}
 	defer redisClient.Close()
 
@@ -104,7 +115,8 @@ func main() {
 
 	zap.S().Info("Asterisk AMI에 연결합니다.")
 	if err := amiClient.Connect(); err != nil {
-		zap.S().Fatalf("Asterisk AMI 연결 오류: %v", err)
+		zap.S().Errorf("Asterisk AMI 연결 오류: %v", err)
+		return 1
 	}
 
 	zap.S().Info("초기화 완료. 서버가 실행 중입니다.")
@@ -112,4 +124,5 @@ func main() {
 	// SIGINT/SIGTERM 수신 시까지 대기 후 정상 종료(defer된 리소스 정리 수행)
 	<-ctx.Done()
 	zap.S().Info("종료 신호를 수신했습니다. 정상 종료를 시작합니다.")
+	return 0
 }
