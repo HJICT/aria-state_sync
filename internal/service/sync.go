@@ -599,6 +599,12 @@ func (s *SyncService) flushContactBuffer(ctx context.Context) {
 		contacts = append(contacts, item)
 	}
 
+	// 파이프라인 내에서는 Script.Run의 NOSCRIPT 폴백이 동작하지 않으므로, 사전에 스크립트를 Redis에 로드합니다.
+	if err := updateContactScript.Load(ctx, s.redis).Err(); err != nil {
+		zap.S().Errorf("[Redis] Contact 업데이트 스크립트 로드 실패: %v", err)
+		return
+	}
+
 	const batchSize = 500
 	for i := 0; i < len(contacts); i += batchSize {
 		end := i + batchSize
@@ -610,7 +616,7 @@ func (s *SyncService) flushContactBuffer(ctx context.Context) {
 		pipe := s.redis.Pipeline()
 		for _, item := range chunk {
 			reachKey := fmt.Sprintf("asterisk:exten:%s:reachability", item.Endpoint)
-			updateContactScript.Run(ctx, pipe, []string{reachKey}, item.UserAgent, item.IPAddress)
+			updateContactScript.EvalSha(ctx, pipe, []string{reachKey}, item.UserAgent, item.IPAddress)
 		}
 		if _, err := pipe.Exec(ctx); err != nil {
 			zap.S().Errorf("[Redis] ContactList Pipeline 업데이트 실패: %v", err)
